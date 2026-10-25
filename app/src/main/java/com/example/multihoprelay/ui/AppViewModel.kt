@@ -14,8 +14,13 @@ import com.example.multihoprelay.model.TransferInfo
 import com.example.multihoprelay.model.TransferState
 import com.example.multihoprelay.networking.RelayStats
 import com.example.multihoprelay.util.LogEntry
+import com.example.multihoprelay.model.ReachableNode
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -32,6 +37,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val pendingIncomingConnection: StateFlow<com.example.multihoprelay.model.PendingIncomingConnection?> by lazy {
         container.connectionManager.pendingIncomingConnection
+    }
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _preselectedDestination = MutableStateFlow<NodeId?>(null)
+    val preselectedDestination: StateFlow<NodeId?> = _preselectedDestination.asStateFlow()
+
+    fun selectDestination(destination: NodeId) {
+        _preselectedDestination.value = destination
+    }
+
+    fun clearPreselectedDestination() {
+        _preselectedDestination.value = null
     }
 
     init {
@@ -55,8 +74,83 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         container.connectionManager.isScanning
     }
 
+    val reachableNodes: StateFlow<List<ReachableNode>> by lazy {
+        combine(
+            container.connectionManager.neighbors,
+            container.routingManager.routesFlow
+        ) { neighborsList, routesMap ->
+            val result = mutableListOf<ReachableNode>()
+            val processedNodeIds = mutableSetOf<NodeId>()
+
+            // 1. Direct neighbors from Nearby Connections
+            neighborsList.filter { it.nodeId != nodeId }.forEach { neighbor ->
+                val devName = container.connectionManager.getDeviceName(neighbor.nodeId)
+                    ?: container.routingManager.getKnownDeviceName(neighbor.nodeId)
+                    ?: ""
+                val isConnected = neighbor.isConnected
+                result.add(
+                    ReachableNode(
+                        nodeId = neighbor.nodeId,
+                        deviceName = devName,
+                        isDirect = true,
+                        isConnected = isConnected,
+                        nextHop = neighbor.nodeId,
+                        hopCount = 1,
+                        fullPath = listOf(nodeId, neighbor.nodeId),
+                        isAvailable = isConnected
+                    )
+                )
+                processedNodeIds.add(neighbor.nodeId)
+            }
+
+            // 2. Multi-hop reachable nodes from route advertisements
+            val now = System.currentTimeMillis()
+            routesMap.forEach { (destNode, route) ->
+                if (destNode != nodeId && !processedNodeIds.contains(destNode)) {
+                    val devName = container.routingManager.getKnownDeviceName(destNode) ?: ""
+                    val isExpired = route.isExpired(now, Route.DEFAULT_ROUTE_TTL_MILLIS)
+                    val isNextHopConnected = neighborsList.any { it.nodeId == route.nextHop && it.isConnected }
+                    val isAvailable = !isExpired && isNextHopConnected
+                    result.add(
+                        ReachableNode(
+                            nodeId = destNode,
+                            deviceName = devName,
+                            isDirect = false,
+                            isConnected = isAvailable,
+                            nextHop = route.nextHop,
+                            hopCount = route.hopCount,
+                            fullPath = route.fullPath,
+                            isAvailable = isAvailable
+                        )
+                    )
+                    processedNodeIds.add(destNode)
+                }
+            }
+            result
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+
     fun refreshNearbyDevices() {
         container.connectionManager.refreshDiscovery()
+    }
+
+    fun refreshAll() {
+        if (_isRefreshing.value) return
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                container.logger.info("REFRESH", "Refresh initiated: Nearby discovery + route advertisements")
+                container.connectionManager.refreshDiscovery()
+                container.routingManager.pruneExpiredRoutesNow()
+                container.routingManager.broadcastRouteAdvertisement()
+                delay(1200L)
+            } catch (e: Exception) {
+                container.logger.warn("REFRESH", "Refresh encountered error: ${e.message}")
+            } finally {
+                _isRefreshing.value = false
+                container.logger.info("REFRESH", "Refresh completed")
+            }
+        }
     }
 
     fun connectToNeighbor(nodeId: NodeId): Boolean =

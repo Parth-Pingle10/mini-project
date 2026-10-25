@@ -90,12 +90,13 @@ class AppContainer(private val context: Context) {
         )
         val routing = existingRouting ?: RoutingManager(connMgr, identityProvider, appScope, logger)
         val relay = existingRelay ?: RelayManager(connMgr, routing, database.relayQueueDao(), settingsRepository.relaySettingsFlow, appScope, logger)
-        val transfer = existingTransfer ?: TransferManager(connMgr, routing, identityProvider, database.transferDao(), fileStorage, appScope, logger)
+        val transfer = existingTransfer ?: TransferManager(connMgr, routing, identityProvider, database.transferDao(), fileStorage, appScope, logger, context = context)
         connMgr.setOnNeighborLostListener { lostNodeId ->
             routing.onNeighborLost(lostNodeId)
             transfer.onNeighborLost(lostNodeId)
         }
         connMgr.setOnNeighborConnectedListener { connectedNodeId ->
+            connMgr.getDeviceName(connectedNodeId)?.let { routing.registerDeviceName(connectedNodeId, it) }
             routing.onNeighborDiscovered(connectedNodeId)
         }
         _connectionManager = connMgr

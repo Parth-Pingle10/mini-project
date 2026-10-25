@@ -53,12 +53,23 @@ class RoutingManager(
     private val seenPacketIds = ConcurrentHashMap<String, Long>() // packetId -> seenAtMillis, for RREQ/RREP dedup
     private val requestIdGenerator = AtomicLong(0)
     private val knownPublicKeys = ConcurrentHashMap<NodeId, ByteArray>()
+    private val knownDeviceNames = ConcurrentHashMap<NodeId, String>()
+    private val advSequenceNumber = AtomicLong(0)
+    private val seenAdvSequenceNumbers = ConcurrentHashMap<NodeId, Long>()
 
-    /** Returns a previously-learned public key for [nodeId], if one has passed through an RREP or HELLO. */
+    /** Returns a previously-learned public key for [nodeId], if one has passed through an RREP, HELLO, or advertisement. */
     fun getKnownPublicKey(nodeId: NodeId): ByteArray? = knownPublicKeys[nodeId]
 
     fun registerPublicKey(nodeId: NodeId, publicKeyBytes: ByteArray) {
         knownPublicKeys[nodeId] = publicKeyBytes
+    }
+
+    fun getKnownDeviceName(nodeId: NodeId): String? = knownDeviceNames[nodeId]
+
+    fun registerDeviceName(nodeId: NodeId, deviceName: String) {
+        if (deviceName.isNotBlank()) {
+            knownDeviceNames[nodeId] = deviceName
+        }
     }
 
     private val _routesFlow = MutableStateFlow<Map<NodeId, Route>>(emptyMap())
@@ -75,7 +86,8 @@ class RoutingManager(
         if (startPeriodicMaintenance) {
             jobs += scope.launch {
                 while (true) {
-                    delay(15_000L)
+                    delay(10_000L)
+                    broadcastRouteAdvertisement()
                     pruneExpiredRoutes()
                     evictOldDedupEntries()
                 }
@@ -95,6 +107,9 @@ class RoutingManager(
     /** Records/refreshes a direct 1-hop route whenever a neighbor becomes reachable. */
     fun onNeighborDiscovered(neighbor: NodeId) {
         upsertRoute(Route(destination = neighbor, nextHop = neighbor, hopCount = 1, fullPath = listOf(transport.selfNodeId, neighbor)))
+        scope.launch {
+            broadcastRouteAdvertisement()
+        }
     }
 
     fun onNeighborLost(neighbor: NodeId) {
@@ -108,8 +123,13 @@ class RoutingManager(
                 affected.forEach { dest ->
                     broadcastRouteError(neighbor, dest)
                 }
+                broadcastRouteAdvertisement()
             }
         }
+    }
+
+    fun pruneExpiredRoutesNow() {
+        pruneExpiredRoutes()
     }
 
     /**
@@ -172,6 +192,7 @@ class RoutingManager(
             PacketType.ROUTE_REQUEST -> handleRouteRequest(packet)
             PacketType.ROUTE_REPLY -> handleRouteReply(packet)
             PacketType.ROUTE_ERROR -> handleRouteError(packet)
+            PacketType.ROUTE_ADVERTISEMENT -> handleRouteAdvertisement(packet)
             else -> Unit // handled by RelayManager / TransferManager
         }
     }
@@ -363,5 +384,129 @@ class RoutingManager(
 
     private fun publishRoutes() {
         _routesFlow.value = routeTable.toMap()
+    }
+
+    /**
+     * Broadcasts route advertisements to all currently connected neighbors using split-horizon.
+     * Propagates reachability, device names, and public keys through intermediate nodes.
+     */
+    suspend fun broadcastRouteAdvertisement() {
+        val connectedNeighbors = transport.neighbors.value.filter { it.isConnected }
+        if (connectedNeighbors.isEmpty()) return
+
+        val seq = advSequenceNumber.incrementAndGet()
+        val now = System.currentTimeMillis()
+        val selfKey = identityProvider.publicKeyEncoded()
+        val selfName = android.os.Build.MODEL.take(20)
+
+        connectedNeighbors.forEach { neighbor ->
+            val entries = mutableListOf<RouteAdvertisementEntry>()
+            // Always advertise self to connected neighbor
+            entries.add(
+                RouteAdvertisementEntry(
+                    destinationNodeId = transport.selfNodeId,
+                    deviceName = selfName,
+                    hopCount = 0,
+                    isAvailable = true,
+                    publicKey = selfKey
+                )
+            )
+
+            // Advertise all active routes, applying split-horizon (omit routes whose nextHop is this neighbor)
+            routeTable.forEach { (dest, route) ->
+                if (dest != transport.selfNodeId && dest != neighbor.nodeId && route.nextHop != neighbor.nodeId) {
+                    if (!route.isExpired(now, routeTtlMillis)) {
+                        entries.add(
+                            RouteAdvertisementEntry(
+                                destinationNodeId = dest,
+                                deviceName = knownDeviceNames[dest] ?: "",
+                                hopCount = route.hopCount,
+                                isAvailable = true,
+                                publicKey = knownPublicKeys[dest] ?: ByteArray(0)
+                            )
+                        )
+                    }
+                }
+            }
+
+            val payload = RouteAdvertisementPayload(
+                sequenceNumber = seq,
+                advertiserNode = transport.selfNodeId,
+                entries = entries
+            ).encode()
+
+            transport.sendToNeighbor(
+                neighbor.nodeId,
+                Packet(
+                    type = PacketType.ROUTE_ADVERTISEMENT,
+                    sourceNodeId = transport.selfNodeId,
+                    destinationNodeId = neighbor.nodeId,
+                    payload = payload
+                )
+            )
+        }
+        logger.info("ROUTE", "Broadcasted route advertisement #$seq to ${connectedNeighbors.size} connected neighbor(s)")
+    }
+
+    private fun handleRouteAdvertisement(packet: Packet) {
+        val adv = try {
+            RouteAdvertisementPayload.decode(packet.payload)
+        } catch (e: Exception) {
+            logger.warn("ROUTE", "Malformed ROUTE_ADVERTISEMENT dropped: ${e.message}")
+            return
+        }
+        if (adv.advertiserNode == transport.selfNodeId) return
+
+        val lastSeq = seenAdvSequenceNumbers[adv.advertiserNode] ?: -1L
+        if (adv.sequenceNumber <= lastSeq) {
+            return // reject stale advertisement
+        }
+        seenAdvSequenceNumbers[adv.advertiserNode] = adv.sequenceNumber
+
+        var routesChanged = false
+        val now = System.currentTimeMillis()
+
+        for (entry in adv.entries) {
+            val dest = entry.destinationNodeId
+            if (dest == transport.selfNodeId) continue
+            if (entry.hopCount + 1 > maxHops) continue
+
+            if (entry.deviceName.isNotBlank()) {
+                knownDeviceNames[dest] = entry.deviceName
+            }
+            if (entry.publicKey.isNotEmpty()) {
+                registerPublicKey(dest, entry.publicKey)
+            }
+
+            val newHopCount = entry.hopCount + 1
+            val nextHop = adv.advertiserNode
+
+            if (entry.isAvailable) {
+                val existing = routeTable[dest]
+                if (existing == null || existing.nextHop == nextHop || newHopCount < existing.hopCount || existing.isExpired(now, routeTtlMillis)) {
+                    val fullPath = listOf(transport.selfNodeId, nextHop, dest).distinct()
+                    routeTable[dest] = Route(
+                        destination = dest,
+                        nextHop = nextHop,
+                        hopCount = newHopCount,
+                        fullPath = fullPath,
+                        lastConfirmedAtMillis = now
+                    )
+                    routesChanged = true
+                    logger.info("ROUTE", "Learned route to $dest via $nextHop ($newHopCount hops, device: ${entry.deviceName})")
+                }
+            } else {
+                val existing = routeTable[dest]
+                if (existing != null && existing.nextHop == nextHop) {
+                    routeTable.remove(dest)
+                    routesChanged = true
+                    logger.info("ROUTE", "Removed unavailable route to $dest via $nextHop")
+                }
+            }
+        }
+
+        if (routesChanged) {
+            publishRoutes()
+        }
     }
 }

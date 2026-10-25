@@ -62,7 +62,8 @@ class TransferManager(
     private val logger: MeshLogger,
     private val chunkSize: Int = ChunkManager.DEFAULT_CHUNK_SIZE,
     private val autoAcceptForTesting: Boolean = false,
-    private val acceptanceTimeoutSeconds: Long = 60L
+    private val acceptanceTimeoutSeconds: Long = 60L,
+    private val context: android.content.Context? = null
 ) {
     private val encryptionManager = EncryptionManager()
     private val signatureManager = SignatureManager()
@@ -289,8 +290,9 @@ class TransferManager(
         }
 
         updateState(transferId, TransferState.TRANSFERRING)
-        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
-            logger.info("TRANSFER", "Transfer $transferId: transferring via Nearby Connections native file payload")
+        val isDirectConnected = transport.neighbors.value.any { it.nodeId == destination && it.isConnected }
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager && isDirectConnected) {
+            logger.info("TRANSFER", "Transfer $transferId: transferring via Nearby Connections native file payload (direct 1-hop link)")
             val payloadId = transport.sendNearbyFilePayload(destination, transferId, sourceFile)
             if (payloadId == null) {
                 updateState(transferId, TransferState.FAILED, "Failed to start Nearby file payload transfer")
@@ -308,6 +310,7 @@ class TransferManager(
             return
         }
 
+        logger.info("TRANSFER", "Transfer $transferId: transferring via multihop chunk relay (${chunkMetas.size} chunks, route: ${route.fullPath.joinToString(" -> ")})")
         val chunkAcks = ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
         pendingChunkAcks[transferId] = chunkAcks
 
@@ -337,7 +340,7 @@ class TransferManager(
                     continue
                 }
 
-                acked = withTimeoutOrNull(6_000L) {
+                acked = withTimeoutOrNull(8_000L) {
                     ackDeferred.await()
                     true
                 } ?: false
@@ -890,7 +893,13 @@ class TransferManager(
         if (entity.state.isTerminal) return
         updateState(transferId, TransferState.VERIFYING)
 
-        val staging = File(entity.localFileUri ?: return)
+        val staging = entity.localFileUri?.let { File(it) } ?: fileStorage.stagingFileFor(transferId)
+        if (!staging.exists()) {
+            logger.error("TRANSFER", "Transfer $transferId: staging file does not exist at ${staging.absolutePath}")
+            updateState(transferId, TransferState.FAILED, "Staging file missing")
+            return
+        }
+
         val actualHash = ChunkManager.fullFileSha256(staging)
         val expectedHash = entity.fileSha256
 
@@ -913,9 +922,16 @@ class TransferManager(
         val finalFile = fileStorage.finalFileFor(transferId, entity.fileName)
         fileStorage.moveToFinal(staging, finalFile)
 
+        if (!finalFile.exists()) {
+            logger.error("TRANSFER", "Transfer $transferId: destination file does not exist after moveToFinal")
+            updateState(transferId, TransferState.FAILED, "Failed to save final file")
+            return
+        }
+
         transferDao.update(
             entity.copy(
                 state = TransferState.COMPLETED,
+                chunksDone = entity.totalChunks,
                 outputFilePath = finalFile.absolutePath,
                 updatedAtMillis = System.currentTimeMillis()
             )
@@ -972,7 +988,7 @@ class TransferManager(
 
     /** Sends a packet to [destination], resolving the next hop via direct-neighbor check or the route table. */
     private suspend fun sendPacketToward(destination: NodeId, packet: Packet): Boolean {
-        val direct = transport.neighbors.value.any { it.nodeId == destination }
+        val direct = transport.neighbors.value.any { it.nodeId == destination && it.isConnected }
         val nextHop = if (direct) destination else (routingManager.getRoute(destination)?.nextHop ?: destination)
         val sent = transport.sendToNeighbor(nextHop, packet)
         if (!sent) {
@@ -1056,28 +1072,61 @@ class TransferManager(
             com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.SUCCESS -> {
                 logger.info("TRANSFER", "Nearby payload transfer SUCCESS for transfer $transferId")
                 if (entity.direction == TransferDirection.INCOMING) {
+                    if (entity.state == TransferState.COMPLETED || entity.state == TransferState.VERIFYING) {
+                        logger.debug("TRANSFER", "Transfer $transferId already in ${entity.state}, ignoring duplicate SUCCESS update")
+                        return
+                    }
+
                     if (payload != null) {
                         val staging = fileStorage.stagingFileFor(transferId)
-                        val pFile = payload.asFile()
-                        try {
-                            val javaFile = pFile?.asJavaFile()
-                            val pfd = pFile?.asParcelFileDescriptor()
-                            if (javaFile != null) {
-                                if (javaFile.absolutePath != staging.absolutePath) {
-                                    javaFile.copyTo(staging, overwrite = true)
+                        staging.parentFile?.mkdirs()
+
+                        val inputStream: java.io.InputStream? = try {
+                            (transport as? com.example.multihoprelay.nearby.NearbyConnectionManager)?.openPayloadInputStream(payload)
+                                ?: payload.asFile()?.asUri()?.let { uri ->
+                                    context?.contentResolver?.openInputStream(uri)
                                 }
-                            } else if (pfd != null) {
-                                java.io.FileInputStream(pfd.fileDescriptor).use { input ->
-                                    java.io.FileOutputStream(staging).use { output ->
-                                        input.copyTo(output)
-                                    }
+                                ?: payload.asFile()?.asParcelFileDescriptor()?.let { pfd ->
+                                    java.io.FileInputStream(pfd.fileDescriptor)
+                                }
+                                ?: payload.asFile()?.let { pFile ->
+                                    try {
+                                        @Suppress("DEPRECATION")
+                                        pFile.asJavaFile()?.takeIf { it.exists() && it.canRead() }?.let { java.io.FileInputStream(it) }
+                                    } catch (_: Exception) { null }
+                                }
+                        } catch (e: Exception) {
+                            logger.error("TRANSFER", "Failed to obtain stream for received payload $transferId: ${e.message}")
+                            null
+                        }
+
+                        if (inputStream == null) {
+                            logger.error("TRANSFER", "Could not open input stream from received payload for transfer $transferId")
+                            updateState(transferId, TransferState.FAILED, "Cannot open received file stream from Nearby Connections")
+                            return
+                        }
+
+                        try {
+                            inputStream.use { input ->
+                                java.io.FileOutputStream(staging).use { output ->
+                                    input.copyTo(output)
                                 }
                             }
                         } catch (e: Exception) {
-                            logger.error("TRANSFER", "Failed to stage received file payload for $transferId: ${e.message}")
+                            logger.error("TRANSFER", "Failed to copy received file payload for $transferId: ${e.message}")
                             updateState(transferId, TransferState.FAILED, "Failed to copy received file: ${e.message}")
                             return
                         }
+
+                        if (!staging.exists() || (entity.fileSizeBytes > 0L && staging.length() == 0L)) {
+                            logger.error("TRANSFER", "Copied staging file for $transferId is empty or missing")
+                            updateState(transferId, TransferState.FAILED, "Received file is empty or corrupted")
+                            return
+                        }
+
+                        logger.info("TRANSFER", "Staging file written successfully for transfer $transferId: size=${staging.length()} bytes")
+                        (transport as? com.example.multihoprelay.nearby.NearbyConnectionManager)?.incomingFilePayloads?.remove(update.payloadId)
+                        (transport as? com.example.multihoprelay.nearby.NearbyConnectionManager)?.payloadToTransfer?.remove(update.payloadId)
                         finalizeReceivedTransfer(transferId)
                     }
                 } else {

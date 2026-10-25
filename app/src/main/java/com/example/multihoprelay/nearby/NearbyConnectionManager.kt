@@ -99,6 +99,8 @@ class NearbyConnectionManager(
         onNeighborConnectedCallback = listener
     }
 
+    fun getDeviceName(nodeId: NodeId): String? = nodeIdToDeviceName[nodeId]
+
     fun start() {
         startAdvertising()
         startDiscovery()
@@ -415,6 +417,54 @@ class NearbyConnectionManager(
             transferToPayload.remove(transferId)
             return null
         }
+    }
+
+    /**
+     * Safely opens an InputStream from an incoming Nearby Connections file payload.
+     * Uses asUri() with ContentResolver first to comply with Android Scoped Storage,
+     * with fallbacks to ParcelFileDescriptor and java.io.File.
+     */
+    fun openPayloadInputStream(payload: Payload): java.io.InputStream? {
+        val pFile = payload.asFile() ?: return null
+
+        // 1. Preferred modern Android approach: content URI granted by Google Play services
+        val uri = pFile.asUri()
+        if (uri != null) {
+            try {
+                val stream = context.contentResolver.openInputStream(uri)
+                if (stream != null) {
+                    logger.info("NEARBY", "Opened payload stream using content URI: $uri")
+                    return stream
+                }
+            } catch (e: Exception) {
+                logger.warn("NEARBY", "Failed to open inputStream from payload content URI $uri: ${e.message}")
+            }
+        }
+
+        // 2. Secondary approach: ParcelFileDescriptor
+        try {
+            val pfd = pFile.asParcelFileDescriptor()
+            val stream = java.io.FileInputStream(pfd.fileDescriptor)
+            logger.info("NEARBY", "Opened payload stream using parcel file descriptor")
+            return stream
+        } catch (e: Exception) {
+            logger.warn("NEARBY", "Failed to open inputStream from parcel file descriptor: ${e.message}")
+        }
+
+        // 3. Fallback: java.io.File for older Android versions
+        try {
+            @Suppress("DEPRECATION")
+            val javaFile = pFile.asJavaFile()
+            if (javaFile != null && javaFile.exists() && javaFile.canRead()) {
+                val stream = java.io.FileInputStream(javaFile)
+                logger.info("NEARBY", "Opened payload stream using java.io.File: ${javaFile.absolutePath}")
+                return stream
+            }
+        } catch (e: Exception) {
+            logger.warn("NEARBY", "Failed to open inputStream from java.io.File: ${e.message}")
+        }
+
+        return null
     }
 
     fun cancelFilePayload(transferId: UUID) {

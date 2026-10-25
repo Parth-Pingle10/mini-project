@@ -199,7 +199,16 @@ fun MultiHopRelayApp(viewModel: AppViewModel, onRequestPermissions: () -> Unit) 
                     onRequestPermissions = onRequestPermissions
                 )
             }
-            composable(Screen.Nearby.route) { NearbyDevicesScreen(viewModel, onRequestPermissions = onRequestPermissions) }
+            composable(Screen.Nearby.route) {
+                NearbyDevicesScreen(
+                    viewModel = viewModel,
+                    onRequestPermissions = onRequestPermissions,
+                    onNavigateToSend = { dest ->
+                        viewModel.selectDestination(dest)
+                        navController.navigate(Screen.Send.route)
+                    }
+                )
+            }
             composable(Screen.Send.route) { SendScreen(viewModel) }
             composable(Screen.Transfers.route) { TransfersScreen(viewModel) }
             composable(Screen.Relay.route) { RelayScreen(viewModel) }

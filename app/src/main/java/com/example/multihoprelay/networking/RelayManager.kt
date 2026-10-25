@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 data class RelayStats(
-    val relayModeEnabled: Boolean = false,
+    val relayModeEnabled: Boolean = true,
     val activeRelays: Int = 0,
     val queuedPackets: Int = 0,
     val storageUsedBytes: Long = 0,
@@ -185,7 +185,7 @@ class RelayManager(
 
     private fun attemptForward(entity: RelayPacketEntity, packet: Packet) {
         val route = routingManager.getRoute(packet.destinationNodeId)
-        val directNeighbor = transport.neighbors.value.any { it.nodeId == packet.destinationNodeId }
+        val directNeighbor = transport.neighbors.value.any { it.nodeId == packet.destinationNodeId && it.isConnected }
         val nextHop = when {
             directNeighbor -> packet.destinationNodeId
             route != null -> route.nextHop

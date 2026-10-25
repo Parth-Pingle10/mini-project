@@ -59,8 +59,8 @@ data class SelectedFileMeta(
 @Composable
 fun SendScreen(viewModel: AppViewModel) {
     val context = LocalContext.current
-    val neighbors by viewModel.neighbors.collectAsState()
-    val routes by viewModel.routes.collectAsState()
+    val reachableNodes by viewModel.reachableNodes.collectAsState()
+    val preselectedDestination by viewModel.preselectedDestination.collectAsState()
     val transfers by viewModel.transfers.collectAsState()
     val scope = rememberCoroutineScope()
 
@@ -68,6 +68,13 @@ fun SendScreen(viewModel: AppViewModel) {
     var selectedDestination by remember { mutableStateOf<NodeId?>(null) }
     var activeTransferId by remember { mutableStateOf<UUID?>(null) }
     var filePickerError by remember { mutableStateOf<String?>(null) }
+
+    androidx.compose.runtime.LaunchedEffect(preselectedDestination) {
+        preselectedDestination?.let {
+            selectedDestination = it
+            viewModel.clearPreselectedDestination()
+        }
+    }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -124,27 +131,19 @@ fun SendScreen(viewModel: AppViewModel) {
         // 2. Destination Selection Card
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                Text("Recipient Device", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Text("Recipient Device (Direct & Reachable Nodes)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.height(4.dp))
 
-                val directNeighbors = neighbors
-                val allDestinations = (directNeighbors.map { it.nodeId } + routes.keys)
-                    .filter { it != viewModel.nodeId }
-                    .distinct()
-
-                if (allDestinations.isEmpty()) {
+                if (reachableNodes.isEmpty()) {
                     Text(
-                        "No nearby devices discovered. Check the 'Nearby' tab to discover and connect to a peer first.",
+                        "No nearby or reachable nodes discovered. Check the 'Nearby' tab to discover and connect to a peer.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp)
                     )
                 } else {
-                    allDestinations.forEach { destNode ->
-                        val direct = directNeighbors.firstOrNull { it.nodeId == destNode }
-                        val isDirectConnected = direct?.isConnected == true
-                        val routeToNode = routes[destNode]
-                        val isReachable = isDirectConnected || routeToNode != null
+                    reachableNodes.forEach { node ->
+                        val isReachable = node.isAvailable
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -153,24 +152,18 @@ fun SendScreen(viewModel: AppViewModel) {
                                 .padding(vertical = 4.dp)
                         ) {
                             RadioButton(
-                                selected = selectedDestination == destNode,
-                                onClick = { selectedDestination = destNode }
+                                selected = selectedDestination == node.nodeId,
+                                onClick = { selectedDestination = node.nodeId }
                             )
                             Spacer(Modifier.width(4.dp))
                             Column {
                                 Text(
-                                    "Node ${destNode.value}",
+                                    node.displayName,
                                     fontWeight = FontWeight.SemiBold,
                                     style = MaterialTheme.typography.bodyMedium
                                 )
-                                val statusDesc = when {
-                                    isDirectConnected -> "Connected (Direct Neighbor)"
-                                    direct != null -> "Discovered (Not connected yet)"
-                                    routeToNode != null -> "Mesh Route (${routeToNode.hopCount} hops)"
-                                    else -> "Disconnected"
-                                }
                                 val statusColor = if (isReachable) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
-                                Text(statusDesc, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                                Text(node.statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
                             }
                         }
                     }
@@ -180,7 +173,7 @@ fun SendScreen(viewModel: AppViewModel) {
 
         // 3. Send Button & Status Check
         val isDestConnected = selectedDestination?.let { dest ->
-            neighbors.any { it.nodeId == dest && it.isConnected } || routes.containsKey(dest)
+            reachableNodes.firstOrNull { it.nodeId == dest }?.isAvailable == true
         } ?: false
 
         val canSend = selectedFile != null && selectedDestination != null && isDestConnected && (activeTransfer?.state?.isTerminal != false)
@@ -208,7 +201,7 @@ fun SendScreen(viewModel: AppViewModel) {
 
         if (selectedDestination != null && !isDestConnected) {
             Text(
-                "Selected node is not currently connected. Go to 'Nearby' tab and tap 'Connect' to establish the BLE link.",
+                "Selected node is not currently reachable. Connect to a direct neighbor or ensure an active route exists.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error
             )

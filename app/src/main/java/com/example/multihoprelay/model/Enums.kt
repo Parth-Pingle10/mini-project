@@ -11,6 +11,7 @@ enum class PacketType(val code: Int) {
     ROUTE_REQUEST(2),          // RREQ - flooded to discover a route to a destination
     ROUTE_REPLY(3),            // RREP - unicast back along the reverse path
     ROUTE_ERROR(4),            // RERR - notifies upstream nodes a route broke
+    ROUTE_ADVERTISEMENT(5),    // route advertisement: propagates reachable nodes through intermediate nodes
 
     // Transfer control (end-to-end, relay only sees these as opaque-ish control frames
     // except for the routing header fields which are always in the clear)
