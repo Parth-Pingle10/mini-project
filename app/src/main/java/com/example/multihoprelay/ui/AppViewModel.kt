@@ -30,6 +30,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         container.transferManager.pendingIncomingRequest
     }
 
+    val pendingIncomingConnection: StateFlow<com.example.multihoprelay.model.PendingIncomingConnection?> by lazy {
+        container.connectionManager.pendingIncomingConnection
+    }
+
     init {
         viewModelScope.launch {
             container.transferManager.pendingIncomingRequest.collect { req ->
@@ -60,6 +64,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnectFromNeighbor(nodeId: NodeId): Boolean =
         container.connectionManager.disconnectFromNeighbor(nodeId)
+
+    fun acceptIncomingConnection(endpointId: String) {
+        container.connectionManager.acceptConnection(endpointId)
+    }
+
+    fun rejectIncomingConnection(endpointId: String) {
+        container.connectionManager.rejectConnection(endpointId)
+    }
 
     val routes: StateFlow<Map<NodeId, Route>> by lazy {
         container.routingManager.routesFlow

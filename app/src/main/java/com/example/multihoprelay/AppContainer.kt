@@ -1,7 +1,7 @@
 package com.example.multihoprelay
 
 import android.content.Context
-import com.example.multihoprelay.bluetooth.BleConnectionManager
+import com.example.multihoprelay.nearby.NearbyConnectionManager
 import com.example.multihoprelay.crypto.KeyManager
 import com.example.multihoprelay.crypto.KeyManagerIdentityProvider
 import com.example.multihoprelay.data.database.AppDatabase
@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 /**
  * Hand-rolled dependency container (no DI framework needed for a project this size). Lives
  * for the process lifetime, created once in [MultiHopRelayApp]. Owns the single, real
- * [BleConnectionManager]-backed mesh stack that all screens observe.
+ * [NearbyConnectionManager]-backed mesh stack that all screens observe.
  */
 class AppContainer(private val context: Context) {
 
@@ -49,12 +49,12 @@ class AppContainer(private val context: Context) {
 
     private val identityProvider by lazy { KeyManagerIdentityProvider(keyManager) }
 
-    private var _connectionManager: BleConnectionManager? = null
+    private var _connectionManager: NearbyConnectionManager? = null
     private var _routingManager: RoutingManager? = null
     private var _relayManager: RelayManager? = null
     private var _transferManager: TransferManager? = null
 
-    val connectionManager: BleConnectionManager
+    val connectionManager: NearbyConnectionManager
         get() = _connectionManager ?: getOrCreateMeshStack().connectionManager
 
     val routingManager: RoutingManager
@@ -67,7 +67,7 @@ class AppContainer(private val context: Context) {
         get() = _transferManager ?: getOrCreateMeshStack().transferManager
 
     private data class MeshStack(
-        val connectionManager: BleConnectionManager,
+        val connectionManager: NearbyConnectionManager,
         val routingManager: RoutingManager,
         val relayManager: RelayManager,
         val transferManager: TransferManager
@@ -82,12 +82,11 @@ class AppContainer(private val context: Context) {
             return MeshStack(existingConn, existingRouting, existingRelay, existingTransfer)
         }
         val nodeId = ensureIdentity()
-        val connMgr = existingConn ?: BleConnectionManager(
+        val connMgr = existingConn ?: NearbyConnectionManager(
             context,
             nodeId,
             appScope,
-            logger,
-            publicKeyProvider = { keyManager.getPublicKey().encoded }
+            logger
         )
         val routing = existingRouting ?: RoutingManager(connMgr, identityProvider, appScope, logger)
         val relay = existingRelay ?: RelayManager(connMgr, routing, database.relayQueueDao(), settingsRepository.relaySettingsFlow, appScope, logger)
@@ -95,6 +94,9 @@ class AppContainer(private val context: Context) {
         connMgr.setOnNeighborLostListener { lostNodeId ->
             routing.onNeighborLost(lostNodeId)
             transfer.onNeighborLost(lostNodeId)
+        }
+        connMgr.setOnNeighborConnectedListener { connectedNodeId ->
+            routing.onNeighborDiscovered(connectedNodeId)
         }
         _connectionManager = connMgr
         _routingManager = routing

@@ -83,6 +83,13 @@ class TransferManager(
 
     fun start() {
         incomingJob = transport.incomingPackets.onEach { packet -> handleIncoming(packet) }.launchIn(scope)
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            transport.fileTransferUpdateListener = { transferId, update, payload ->
+                scope.launch {
+                    handleNearbyPayloadUpdate(transferId, update, payload)
+                }
+            }
+        }
     }
 
     fun stop() {
@@ -100,6 +107,9 @@ class TransferManager(
         handledTransfers.clear()
         incomingJob?.cancel()
         incomingJob = null
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            transport.fileTransferUpdateListener = null
+        }
     }
 
     // ------------------------------------------------------------------------------------
@@ -133,6 +143,9 @@ class TransferManager(
         pendingAccept.remove(transferId)?.complete(false)
         pendingConfirmations.remove(transferId)?.complete(false)
         pendingChunkAcks.remove(transferId)?.values?.forEach { it.cancel() }
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            transport.cancelFilePayload(transferId)
+        }
         scope.launch {
             val entity = transferDao.getById(transferId.toString())
             fileStorage.deleteStaging(transferId)
@@ -276,6 +289,25 @@ class TransferManager(
         }
 
         updateState(transferId, TransferState.TRANSFERRING)
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            logger.info("TRANSFER", "Transfer $transferId: transferring via Nearby Connections native file payload")
+            val payloadId = transport.sendNearbyFilePayload(destination, transferId, sourceFile)
+            if (payloadId == null) {
+                updateState(transferId, TransferState.FAILED, "Failed to start Nearby file payload transfer")
+                return
+            }
+            val confirmed = awaitTransferConfirmation(transferId, timeoutMillis = 120_000L)
+            if (!confirmed) {
+                val entity = transferDao.getById(transferId.toString())
+                if (entity?.state == TransferState.CANCELLED) return
+                updateState(transferId, TransferState.FAILED, "Receiver did not confirm file validation")
+                return
+            }
+            updateState(transferId, TransferState.COMPLETED)
+            logger.info("TRANSFER", "Transfer $transferId: COMPLETED and confirmed by receiver")
+            return
+        }
+
         val chunkAcks = ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
         pendingChunkAcks[transferId] = chunkAcks
 
@@ -1003,6 +1035,65 @@ class TransferManager(
         )
         if (state.isFailure) {
             logger.warn("TRANSFER", "Transfer $transferId -> $state${errorMessage?.let { ": $it" } ?: ""}")
+        }
+    }
+
+    private suspend fun handleNearbyPayloadUpdate(
+        transferId: UUID,
+        update: com.google.android.gms.nearby.connection.PayloadTransferUpdate,
+        payload: com.google.android.gms.nearby.connection.Payload?
+    ) {
+        val entity = transferDao.getById(transferId.toString()) ?: return
+        when (update.status) {
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.IN_PROGRESS -> {
+                if (update.totalBytes > 0 && entity.totalChunks > 0) {
+                    val done = ((update.bytesTransferred.toDouble() / update.totalBytes) * entity.totalChunks).toInt().coerceIn(0, entity.totalChunks)
+                    if (done != entity.chunksDone) {
+                        transferDao.update(entity.copy(chunksDone = done, updatedAtMillis = System.currentTimeMillis()))
+                    }
+                }
+            }
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.SUCCESS -> {
+                logger.info("TRANSFER", "Nearby payload transfer SUCCESS for transfer $transferId")
+                if (entity.direction == TransferDirection.INCOMING) {
+                    if (payload != null) {
+                        val staging = fileStorage.stagingFileFor(transferId)
+                        val pFile = payload.asFile()
+                        try {
+                            val javaFile = pFile?.asJavaFile()
+                            val pfd = pFile?.asParcelFileDescriptor()
+                            if (javaFile != null) {
+                                if (javaFile.absolutePath != staging.absolutePath) {
+                                    javaFile.copyTo(staging, overwrite = true)
+                                }
+                            } else if (pfd != null) {
+                                java.io.FileInputStream(pfd.fileDescriptor).use { input ->
+                                    java.io.FileOutputStream(staging).use { output ->
+                                        input.copyTo(output)
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            logger.error("TRANSFER", "Failed to stage received file payload for $transferId: ${e.message}")
+                            updateState(transferId, TransferState.FAILED, "Failed to copy received file: ${e.message}")
+                            return
+                        }
+                        finalizeReceivedTransfer(transferId)
+                    }
+                } else {
+                    transferDao.update(entity.copy(chunksDone = entity.totalChunks, updatedAtMillis = System.currentTimeMillis()))
+                }
+            }
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.FAILURE -> {
+                logger.error("TRANSFER", "Nearby payload transfer FAILED for transfer $transferId")
+                fileStorage.deleteStaging(transferId)
+                updateState(transferId, TransferState.FAILED, "Transfer failed over Nearby Connections")
+            }
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.CANCELED -> {
+                logger.info("TRANSFER", "Nearby payload transfer CANCELED for transfer $transferId")
+                fileStorage.deleteStaging(transferId)
+                updateState(transferId, TransferState.CANCELLED, "Transfer cancelled")
+            }
         }
     }
 

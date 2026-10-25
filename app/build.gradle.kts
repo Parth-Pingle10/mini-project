@@ -90,6 +90,9 @@ dependencies {
     // DataStore for simple settings
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    // Google Play Services Nearby Connections API
+    implementation("com.google.android.gms:play-services-nearby:19.3.0")
+
     // Unit tests
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")

@@ -5,23 +5,22 @@
     <!-- Bluetooth hardware -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
-    <!-- Legacy Bluetooth permissions, needed up to API 30. maxSdkVersion caps them
-         so on API 31+ only the new granular runtime permissions below apply. -->
+    <!-- Bluetooth permissions -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-
-    <!-- Android 12+ (API 31+) granular runtime Bluetooth permissions -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Pre-Android 12 required location permission for BLE scanning results.
-         We declare "neverForLocation" above so Android 12+ devices do not require
-         location permission for scanning, but devices on API 26-30 still need it. -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
+    <!-- Wi-Fi & Location permissions for Google Nearby Connections -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <!-- Foreground service used only while an active transfer or relay session is running -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

@@ -126,6 +126,7 @@ fun MultiHopRelayApp(viewModel: AppViewModel, onRequestPermissions: () -> Unit) 
     val items = listOf(Screen.Home, Screen.Nearby, Screen.Send, Screen.Transfers, Screen.Relay, Screen.Settings)
 
     val pendingIncomingReq by viewModel.pendingIncomingRequest.collectAsState()
+    val pendingIncomingConn by viewModel.pendingIncomingConnection.collectAsState()
     val transfers by viewModel.transfers.collectAsState()
     val pendingFromTransfers = transfers.firstOrNull {
         it.direction == TransferDirection.INCOMING && it.state == TransferState.PENDING_APPROVAL
@@ -141,6 +142,15 @@ fun MultiHopRelayApp(viewModel: AppViewModel, onRequestPermissions: () -> Unit) 
             createdAtMillis = it.createdAtMillis,
             timeoutSeconds = 60,
             remainingSeconds = 60
+        )
+    }
+
+    if (pendingIncomingConn != null) {
+        val conn = pendingIncomingConn!!
+        IncomingConnectionDialog(
+            connection = conn,
+            onAccept = { viewModel.acceptIncomingConnection(conn.endpointId) },
+            onReject = { viewModel.rejectIncomingConnection(conn.endpointId) }
         )
     }
 
@@ -289,6 +299,85 @@ fun IncomingTransferDialog(
                 )
             ) {
                 Text("Allow")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onReject) {
+                Text("Reject")
+            }
+        }
+    )
+}
+
+@Composable
+fun IncomingConnectionDialog(
+    connection: com.example.multihoprelay.model.PendingIncomingConnection,
+    onAccept: () -> Unit,
+    onReject: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onReject,
+        icon = {
+            Icon(
+                Icons.Filled.Devices,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text("Incoming Connection Request", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "A nearby device wants to connect with your node over Google Nearby Connections.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Peer Node ID:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Text(connection.peerNodeId.value, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Device Name:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Text(connection.endpointName, style = MaterialTheme.typography.bodySmall)
+                }
+                if (connection.authenticationDigits.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Auth Code:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            connection.authenticationDigits,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Text(
+                    "Do you want to accept this connection?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onAccept,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF2E7D32)
+                )
+            ) {
+                Text("Accept")
             }
         },
         dismissButton = {

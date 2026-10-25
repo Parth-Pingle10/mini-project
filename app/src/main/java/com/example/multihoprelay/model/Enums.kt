@@ -22,7 +22,8 @@ enum class PacketType(val code: Int) {
     TRANSFER_COMPLETE(15),     // sender -> receiver: all chunks sent
     TRANSFER_CANCEL(16),       // either direction: abort transfer
     CHUNK_RESEND_REQUEST(17),  // receiver -> sender: request retransmission of missing chunks
-    TRANSFER_CONFIRM(18);      // receiver -> sender: file validated and saved successfully
+    TRANSFER_CONFIRM(18),      // receiver -> sender: file validated and saved successfully
+    TRANSFER_FILE_PAYLOAD(19); // sender -> receiver: native Nearby file payload announcement
 
     companion object {
         fun fromCode(code: Int): PacketType =

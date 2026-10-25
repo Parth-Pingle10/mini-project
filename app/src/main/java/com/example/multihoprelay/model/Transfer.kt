@@ -48,3 +48,13 @@ data class PendingIncomingTransfer(
     val remainingSeconds: Int = 60
 )
 
+/**
+ * Observable in-memory state for a pending incoming connection request from another phone.
+ */
+data class PendingIncomingConnection(
+    val endpointId: String,
+    val endpointName: String,
+    val peerNodeId: NodeId,
+    val authenticationDigits: String
+)
+
