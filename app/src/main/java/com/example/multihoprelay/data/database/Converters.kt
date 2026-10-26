@@ -9,7 +9,12 @@ class Converters {
     @TypeConverter
     fun fromTransferState(value: TransferState): String = value.name
     @TypeConverter
-    fun toTransferState(value: String): TransferState = TransferState.valueOf(value)
+    fun toTransferState(value: String): TransferState =
+        try {
+            TransferState.valueOf(value)
+        } catch (_: Exception) {
+            TransferState.FAILED
+        }
 
     @TypeConverter
     fun fromRelayPacketState(value: RelayPacketState): String = value.name

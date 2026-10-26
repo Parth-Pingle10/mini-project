@@ -16,18 +16,21 @@ import kotlin.math.ceil
  */
 object ChunkManager {
 
-    const val DEFAULT_CHUNK_SIZE = 16 * 1024 // 16 KB plaintext per chunk before AES-GCM overhead
+    const val DEFAULT_CHUNK_SIZE = 4096 // 4 KB plaintext per chunk for responsive BLE streaming
 
     fun totalChunks(fileSizeBytes: Long, chunkSize: Int = DEFAULT_CHUNK_SIZE): Int =
         ceil(fileSizeBytes.toDouble() / chunkSize.toDouble()).toInt().coerceAtLeast(1)
 
     /** Reads exactly the plaintext bytes belonging to [chunkIndex] from [file], without loading the rest. */
     fun readChunk(file: File, chunkIndex: Int, chunkSize: Int = DEFAULT_CHUNK_SIZE): ByteArray {
+        if (file.length() == 0L && chunkIndex == 0) {
+            return ByteArray(0)
+        }
         RandomAccessFile(file, "r").use { raf ->
             val offset = chunkIndex.toLong() * chunkSize
             raf.seek(offset)
             val remaining = (raf.length() - offset).coerceAtMost(chunkSize.toLong()).toInt()
-            require(remaining > 0) { "Chunk index $chunkIndex out of range for file of length ${raf.length()}" }
+            require(remaining >= 0) { "Chunk index $chunkIndex out of range for file of length ${raf.length()}" }
             val buffer = ByteArray(remaining)
             raf.readFully(buffer)
             return buffer
@@ -36,6 +39,7 @@ object ChunkManager {
 
     /** Writes [data] (already-decrypted plaintext) for [chunkIndex] into [file] at the correct offset. */
     fun writeChunk(file: File, chunkIndex: Int, data: ByteArray, chunkSize: Int = DEFAULT_CHUNK_SIZE) {
+        if (data.isEmpty()) return
         RandomAccessFile(file, "rw").use { raf ->
             raf.seek(chunkIndex.toLong() * chunkSize)
             raf.write(data)

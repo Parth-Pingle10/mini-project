@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.map
 private val Context.dataStore by preferencesDataStore(name = "settings")
 
 data class RelaySettings(
-    val relayModeEnabled: Boolean = false,
+    val relayModeEnabled: Boolean = true,
     val maxRelayStorageBytes: Long = 500L * 1024 * 1024, // 500 MB
     val maxPacketAgeMillis: Long = 30L * 60 * 1000,      // 30 minutes
     val maxHops: Int = 8,
@@ -38,7 +38,7 @@ class SettingsRepository(private val context: Context) {
 
     val relaySettingsFlow: Flow<RelaySettings> = context.dataStore.data.map { prefs ->
         RelaySettings(
-            relayModeEnabled = prefs[Keys.RELAY_MODE] ?: false,
+            relayModeEnabled = prefs[Keys.RELAY_MODE] ?: true,
             maxRelayStorageBytes = prefs[Keys.MAX_STORAGE] ?: RelaySettings().maxRelayStorageBytes,
             maxPacketAgeMillis = prefs[Keys.MAX_AGE] ?: RelaySettings().maxPacketAgeMillis,
             maxHops = prefs[Keys.MAX_HOPS] ?: RelaySettings().maxHops,

@@ -22,6 +22,9 @@ interface TransferDao {
     suspend fun getById(transferId: String): TransferEntity?
 
     @Query("SELECT * FROM transfers ORDER BY updatedAtMillis DESC")
+    suspend fun getAll(): List<TransferEntity>
+
+    @Query("SELECT * FROM transfers ORDER BY updatedAtMillis DESC")
     fun observeAll(): Flow<List<TransferEntity>>
 
     @Query("SELECT * FROM transfers WHERE transferId = :transferId LIMIT 1")

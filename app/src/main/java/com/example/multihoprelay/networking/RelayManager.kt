@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 data class RelayStats(
-    val relayModeEnabled: Boolean = false,
+    val relayModeEnabled: Boolean = true,
     val activeRelays: Int = 0,
     val queuedPackets: Int = 0,
     val storageUsedBytes: Long = 0,
@@ -71,10 +71,10 @@ class RelayManager(
     private val relayableTypes = setOf(
         PacketType.TRANSFER_INIT, PacketType.TRANSFER_ACCEPT, PacketType.TRANSFER_REJECT,
         PacketType.CHUNK_DATA, PacketType.CHUNK_ACK, PacketType.TRANSFER_COMPLETE,
-        PacketType.TRANSFER_CANCEL, PacketType.CHUNK_RESEND_REQUEST
+        PacketType.TRANSFER_CANCEL, PacketType.CHUNK_RESEND_REQUEST, PacketType.TRANSFER_CONFIRM
     )
 
-    fun start() {
+    fun start(startPeriodicMaintenance: Boolean = true) {
         jobs += relaySettingsFlow.onEach { settings ->
             currentSettings = settings
             if (forwardSemaphore.availablePermits != settings.maxConcurrentRelays) {
@@ -85,12 +85,14 @@ class RelayManager(
 
         jobs += transport.incomingPackets.onEach { packet -> onPacketReceived(packet) }.launchIn(scope)
 
-        jobs += scope.launch {
-            while (true) {
-                delay(5_000L)
-                retryQueuedPackets()
-                cleanupExpired()
-                refreshStats()
+        if (startPeriodicMaintenance) {
+            jobs += scope.launch {
+                while (true) {
+                    delay(5_000L)
+                    retryQueuedPackets()
+                    cleanupExpired()
+                    refreshStats()
+                }
             }
         }
     }
@@ -183,7 +185,7 @@ class RelayManager(
 
     private fun attemptForward(entity: RelayPacketEntity, packet: Packet) {
         val route = routingManager.getRoute(packet.destinationNodeId)
-        val directNeighbor = transport.neighbors.value.any { it.nodeId == packet.destinationNodeId }
+        val directNeighbor = transport.neighbors.value.any { it.nodeId == packet.destinationNodeId && it.isConnected }
         val nextHop = when {
             directNeighbor -> packet.destinationNodeId
             route != null -> route.nextHop

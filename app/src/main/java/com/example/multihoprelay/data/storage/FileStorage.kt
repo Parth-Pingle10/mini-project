@@ -30,10 +30,14 @@ class FileStorage(context: Context) : TransferFileStore {
     private val receivedDir = File(context.filesDir, "received").apply { mkdirs() }
 
     /** A working file for an in-progress incoming transfer; chunks are written here as they arrive. */
-    override fun stagingFileFor(transferId: UUID): File = File(stagingDir, "$transferId.part")
+    override fun stagingFileFor(transferId: UUID): File {
+        stagingDir.mkdirs()
+        return File(stagingDir, "$transferId.part")
+    }
 
     /** Final resting place for a fully verified, decrypted, received file (still app-private). */
     override fun finalFileFor(transferId: UUID, fileName: String): File {
+        receivedDir.mkdirs()
         val safeName = sanitizeFileName(fileName)
         return File(receivedDir, "${transferId}_$safeName")
     }
