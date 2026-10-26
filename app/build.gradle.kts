@@ -46,6 +46,10 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -85,6 +89,9 @@ dependencies {
 
     // DataStore for simple settings
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // Google Play Services Nearby Connections API
+    implementation("com.google.android.gms:play-services-nearby:19.3.0")
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")

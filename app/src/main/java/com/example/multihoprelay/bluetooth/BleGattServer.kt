@@ -24,38 +24,19 @@ class BleGattServer(
     private val onFragmentReceived: (device: BluetoothDevice, bytes: ByteArray) -> Unit,
     private val onDeviceConnected: (device: BluetoothDevice) -> Unit,
     private val onDeviceDisconnected: (device: BluetoothDevice) -> Unit,
-    private val onMtuChanged: (device: BluetoothDevice, mtu: Int) -> Unit
+    private val onMtuChangedCallback: (device: BluetoothDevice, mtu: Int) -> Unit
 ) {
-    private val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
+    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
     private var gattServer: BluetoothGattServer? = null
     private val notificationSubscribers = ConcurrentHashMap<String, Boolean>()
-    private val notifyQueues = ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<ByteArray>>()
+    private val notifyQueues = ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedDeque<ByteArray>>()
     private val notifyInFlight = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
     private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val notifyTimeoutRunnables = ConcurrentHashMap<String, Runnable>()
 
-    @SuppressLint("MissingPermission")
-    fun start(): Boolean {
-        val rxCharacteristic = BluetoothGattCharacteristic(
-            GattProfile.CHARACTERISTIC_RX_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
-            BluetoothGattCharacteristic.PERMISSION_WRITE
-        )
-        val txCharacteristic = BluetoothGattCharacteristic(
-            GattProfile.CHARACTERISTIC_TX_UUID,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        val cccd = BluetoothGattDescriptor(
-            GattProfile.CCCD_UUID,
-            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
-        )
-        txCharacteristic.addDescriptor(cccd)
-
-        val service = BluetoothGattService(GattProfile.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-        service.addCharacteristic(rxCharacteristic)
-        service.addCharacteristic(txCharacteristic)
-
-        val callback = object : BluetoothGattServerCallback() {
+    internal fun createGattServerCallback(): BluetoothGattServerCallback {
+        return object : BluetoothGattServerCallback() {
             override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
                 if (newState == BluetoothGatt.STATE_CONNECTED) {
                     logger.debug("BLE", "GATT server: device connected ${device.address}")
@@ -63,6 +44,7 @@ class BleGattServer(
                     onDeviceConnected(device)
                 } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
                     logger.debug("BLE", "GATT server: device disconnected ${device.address}")
+                    notifyTimeoutRunnables.remove(device.address)?.let { mainHandler.removeCallbacks(it) }
                     notificationSubscribers.remove(device.address)
                     notifyQueues.remove(device.address)
                     notifyInFlight.remove(device.address)
@@ -98,7 +80,7 @@ class BleGattServer(
                 value: ByteArray
             ) {
                 if (descriptor.uuid == GattProfile.CCCD_UUID) {
-                    val enabled = value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    val enabled = value.isNotEmpty() && value[0] != 0.toByte()
                     notificationSubscribers[device.address] = enabled
                     logger.debug("BLE", "GATT server: notifications ${if (enabled) "enabled" else "disabled"} for ${device.address}")
                 }
@@ -109,15 +91,40 @@ class BleGattServer(
 
             override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
                 logger.debug("BLE", "GATT server: MTU changed to $mtu for ${device.address}")
-                onMtuChanged(device, mtu)
+                onMtuChangedCallback(device, mtu)
             }
 
             override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+                notifyTimeoutRunnables.remove(device.address)?.let { mainHandler.removeCallbacks(it) }
                 notifyInFlight[device.address]?.set(false)
                 drainNotifyQueue(device.address)
             }
         }
+    }
 
+    @SuppressLint("MissingPermission")
+    fun start(): Boolean {
+        val rxCharacteristic = BluetoothGattCharacteristic(
+            GattProfile.CHARACTERISTIC_RX_UUID,
+            BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        val txCharacteristic = BluetoothGattCharacteristic(
+            GattProfile.CHARACTERISTIC_TX_UUID,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        val cccd = BluetoothGattDescriptor(
+            GattProfile.CCCD_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        txCharacteristic.addDescriptor(cccd)
+
+        val service = BluetoothGattService(GattProfile.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        service.addCharacteristic(rxCharacteristic)
+        service.addCharacteristic(txCharacteristic)
+
+        val callback = createGattServerCallback()
         gattServer = bluetoothManager?.openGattServer(context, callback)
         val added = gattServer?.addService(service)
         if (added == null) {
@@ -128,15 +135,10 @@ class BleGattServer(
         return true
     }
 
-    // NOTE: BluetoothGattCharacteristic#setValue and the 3-arg notifyCharacteristicChanged are
-    // deprecated as of API 33 in favor of an overload that takes the value directly, but the
-    // deprecated pair is still fully functional through API 34 and is used here so the same
-    // code path works across this app's minSdk 26 - targetSdk 34 range without an SDK-version
-    // branch. If minSdk is raised past 33 in the future, switch to the newer overload.
     /** Enqueues [data] to be sent as a notification to [device]; serialized per-device via onNotificationSent. */
     fun queueNotify(device: BluetoothDevice, data: ByteArray): Boolean {
         if (notificationSubscribers[device.address] != true) return false
-        notifyQueues.getOrPut(device.address) { java.util.concurrent.ConcurrentLinkedQueue() }.add(data)
+        notifyQueues.getOrPut(device.address) { java.util.concurrent.ConcurrentLinkedDeque() }.add(data)
         drainNotifyQueue(device.address)
         return true
     }
@@ -163,18 +165,36 @@ class BleGattServer(
         }
         characteristic.value = next
         val started = try {
-            server.notifyCharacteristicChanged(device, characteristic, false)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                server.notifyCharacteristicChanged(device, characteristic, false, next) == android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                server.notifyCharacteristicChanged(device, characteristic, false)
+            }
         } catch (e: Exception) {
             logger.warn("BLE", "notify failed for $deviceAddress: ${e.message}")
             false
         }
         if (!started) {
+            queue.addFirst(next)
             flag.set(false)
+            mainHandler.postDelayed({ drainNotifyQueue(deviceAddress) }, 50L)
+        } else {
+            notifyTimeoutRunnables[deviceAddress]?.let { mainHandler.removeCallbacks(it) }
+            val timeoutRunnable = Runnable {
+                if (flag.compareAndSet(true, false)) {
+                    logger.warn("BLE", "Notification timeout (1500ms) for $deviceAddress; clearing notifyInFlight")
+                    drainNotifyQueue(deviceAddress)
+                }
+            }
+            notifyTimeoutRunnables[deviceAddress] = timeoutRunnable
+            mainHandler.postDelayed(timeoutRunnable, 1500L)
         }
     }
 
     @SuppressLint("MissingPermission")
     fun stop() {
+        notifyTimeoutRunnables.values.forEach { mainHandler.removeCallbacks(it) }
+        notifyTimeoutRunnables.clear()
         try {
             gattServer?.close()
         } catch (e: Exception) {

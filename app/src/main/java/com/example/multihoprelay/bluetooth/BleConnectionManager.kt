@@ -29,7 +29,7 @@ private enum class LinkRole { CLIENT, SERVER }
 
 private data class Link(
     val device: BluetoothDevice,
-    val role: LinkRole,
+    var role: LinkRole,
     var nodeId: NodeId?,
     var rssi: Int,
     var lastSeenMillis: Long,
@@ -56,7 +56,8 @@ class BleConnectionManager(
     private val context: Context,
     override val selfNodeId: NodeId,
     private val scope: CoroutineScope,
-    private val logger: MeshLogger
+    private val logger: MeshLogger,
+    private val publicKeyProvider: (() -> ByteArray)? = null
 ) : MeshTransport {
 
     private val links = ConcurrentHashMap<String, Link>() // keyed by device address
@@ -91,7 +92,7 @@ class BleConnectionManager(
             onFragmentReceived = { device, bytes -> onFragmentFromLink(device, LinkRole.SERVER, bytes) },
             onDeviceConnected = { device -> onServerDeviceConnected(device) },
             onDeviceDisconnected = { device -> onServerDeviceDisconnected(device.address) },
-            onMtuChanged = { device, mtu ->
+            onMtuChangedCallback = { device, mtu ->
                 links[device.address]?.mtuPayloadSize = mtu - 3
                 logger.debug("BLE", "MTU negotiated: $mtu with ${links[device.address]?.nodeId ?: device.address}")
             }
@@ -119,6 +120,39 @@ class BleConnectionManager(
         links.clear()
         _isScanning.value = false
         _neighbors.value = emptyList()
+    }
+
+    /**
+     * Manually triggers a connection to a discovered neighbor.
+     */
+    fun connectToNeighbor(nodeId: NodeId): Boolean {
+        val link = links.values.firstOrNull { it.nodeId == nodeId } ?: run {
+            logger.warn("BLE", "connectToNeighbor: Node $nodeId not found in scan records")
+            return false
+        }
+        if (link.status == NeighborStatus.CONNECTED || link.status == NeighborStatus.CONNECTING) {
+            return true
+        }
+        link.status = NeighborStatus.CONNECTING
+        link.role = LinkRole.CLIENT
+        logger.info("BLE", "User requested connection to $nodeId")
+        connectGattClient(link)
+        publishNeighbors()
+        return true
+    }
+
+    /**
+     * Manually disconnects from a neighbor.
+     */
+    fun disconnectFromNeighbor(nodeId: NodeId): Boolean {
+        val link = links.values.firstOrNull { it.nodeId == nodeId } ?: return false
+        logger.info("BLE", "User requested disconnect from $nodeId")
+        link.status = NeighborStatus.DISCONNECTED
+        link.gattClient?.disconnect()
+        link.gattClient = null
+        publishNeighbors()
+        onNeighborLostCallback?.invoke(nodeId)
+        return true
     }
 
     /**
@@ -256,13 +290,14 @@ class BleConnectionManager(
                 link.mtuPayloadSize = link.gattClient?.mtuPayloadSize ?: link.mtuPayloadSize
                 logger.info("BLE", "GATT connected: ${link.nodeId ?: address}")
                 logger.info("BLE", "Neighbor connected: ${link.nodeId ?: address}")
-                // Send initial HELLO packet so remote GATT server learns our Node ID and confirms link
+                // Send initial HELLO packet with public key so remote GATT server learns our Node ID and public key
                 scope.launch {
+                    val keyPayload = publicKeyProvider?.invoke() ?: selfNodeId.value.toByteArray(Charsets.US_ASCII)
                     val helloPacket = Packet(
                         type = PacketType.HELLO,
                         sourceNodeId = selfNodeId,
                         destinationNodeId = link.nodeId ?: NodeId.BROADCAST,
-                        payload = selfNodeId.value.toByteArray(Charsets.US_ASCII)
+                        payload = keyPayload
                     )
                     sendOverLink(link, helloPacket)
                 }
@@ -302,8 +337,11 @@ class BleConnectionManager(
         }
         link.status = NeighborStatus.CONNECTED
         link.lastSeenMillis = System.currentTimeMillis()
-        if (cachedId != null && link.nodeId == null) {
-            link.nodeId = cachedId
+        if (cachedId != null) {
+            links.entries.removeIf { it.key != address && it.value.nodeId == cachedId }
+            if (link.nodeId == null) {
+                link.nodeId = cachedId
+            }
         }
         logger.info("BLE", "GATT connected: ${link.nodeId ?: address}")
         logger.info("BLE", "Neighbor connected: ${link.nodeId ?: address}")
@@ -335,6 +373,7 @@ class BleConnectionManager(
             )
         }
         link.lastSeenMillis = System.currentTimeMillis()
+        logger.debug("BLE", "TRANSFER_FRAGMENT_RECEIVED: from=${device.address} bytes=${bytes.size}")
 
         val complete = try {
             link.reassembly.onFragmentReceived(bytes)
@@ -345,7 +384,8 @@ class BleConnectionManager(
         if (complete != null) {
             try {
                 val packet = PacketCodec.decode(complete)
-                if (link.nodeId == null) {
+                logger.info("BLE", "TRANSFER_PACKET_REASSEMBLED: type=${packet.type} transferId=${packet.transferId} from=${packet.sourceNodeId}")
+                if (link.nodeId == null || link.nodeId != packet.sourceNodeId) {
                     link.nodeId = packet.sourceNodeId
                     link.status = NeighborStatus.CONNECTED
                     publishNeighbors()
@@ -353,6 +393,19 @@ class BleConnectionManager(
                 if (packet.type == PacketType.HELLO) {
                     link.status = NeighborStatus.CONNECTED
                     publishNeighbors()
+                    // If we are the server link, reply with our HELLO carrying our public key
+                    if (link.role == LinkRole.SERVER) {
+                        scope.launch {
+                            val keyPayload = publicKeyProvider?.invoke() ?: selfNodeId.value.toByteArray(Charsets.US_ASCII)
+                            val replyHello = Packet(
+                                type = PacketType.HELLO,
+                                sourceNodeId = selfNodeId,
+                                destinationNodeId = packet.sourceNodeId,
+                                payload = keyPayload
+                            )
+                            sendOverLink(link, replyHello)
+                        }
+                    }
                 }
                 scope.launch { _incomingPackets.emit(packet) }
             } catch (e: MalformedPacketException) {
@@ -383,18 +436,42 @@ class BleConnectionManager(
             return false
         }
         val logicalId = Random.nextInt()
-        val fragments = FragmentAssembler.fragment(encoded, link.mtuPayloadSize.coerceAtLeast(23), logicalId)
-        return when (link.role) {
-            LinkRole.CLIENT -> {
-                val client = link.gattClient ?: return false
-                fragments.forEach { client.sendFragment(it) }
-                true
-            }
-            LinkRole.SERVER -> {
-                fragments.forEach { gattServer.queueNotify(link.device, it) }
-                true
+        val fragments = FragmentAssembler.fragment(encoded, link.mtuPayloadSize.coerceAtLeast(GattProfile.DEFAULT_ATT_PAYLOAD_SIZE), logicalId)
+
+        if (packet.type == PacketType.TRANSFER_INIT) {
+            logger.info("BLE", "TRANSFER_INIT_QUEUED: transferId=${packet.transferId} to=${link.nodeId ?: link.device.address}")
+            logger.info("BLE", "TRANSFER_INIT_WRITE_STARTED: transferId=${packet.transferId} to=${link.nodeId ?: link.device.address} fragments=${fragments.size}")
+        }
+
+        val result = if (link.gattClient != null && link.status == NeighborStatus.CONNECTED) {
+            val client = link.gattClient!!
+            fragments.forEach { client.sendFragment(it) }
+            true
+        } else {
+            when (link.role) {
+                LinkRole.CLIENT -> {
+                    val client = link.gattClient ?: return false
+                    fragments.forEach { client.sendFragment(it) }
+                    true
+                }
+                LinkRole.SERVER -> {
+                    var allQueued = true
+                    fragments.forEach {
+                        val queued = gattServer.queueNotify(link.device, it)
+                        if (!queued) {
+                            allQueued = false
+                            logger.warn("BLE", "queueNotify failed for fragment to ${link.device.address} (notifications not enabled)")
+                        }
+                    }
+                    allQueued
+                }
             }
         }
+
+        if (result && packet.type == PacketType.TRANSFER_INIT) {
+            logger.info("BLE", "TRANSFER_INIT_WRITE_COMPLETED: transferId=${packet.transferId} to=${link.nodeId ?: link.device.address}")
+        }
+        return result
     }
 
     private fun pruneStaleNeighbors() {

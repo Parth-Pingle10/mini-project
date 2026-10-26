@@ -17,17 +17,23 @@ import androidx.core.content.ContextCompat
 object BlePermissions {
 
     fun requiredPermissions(): Array<String> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.BLUETOOTH_CONNECT
-            )
+        val list = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list += Manifest.permission.BLUETOOTH_SCAN
+            list += Manifest.permission.BLUETOOTH_ADVERTISE
+            list += Manifest.permission.BLUETOOTH_CONNECT
+            list += Manifest.permission.NEARBY_WIFI_DEVICES
+            list += Manifest.permission.ACCESS_FINE_LOCATION
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            list += Manifest.permission.BLUETOOTH_SCAN
+            list += Manifest.permission.BLUETOOTH_ADVERTISE
+            list += Manifest.permission.BLUETOOTH_CONNECT
+            list += Manifest.permission.ACCESS_FINE_LOCATION
         } else {
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
+            list += Manifest.permission.ACCESS_FINE_LOCATION
+            list += Manifest.permission.ACCESS_COARSE_LOCATION
         }
+        return list.toTypedArray()
     }
 
     fun hasAllPermissions(context: Context): Boolean =

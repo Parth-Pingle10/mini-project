@@ -8,6 +8,8 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import com.example.multihoprelay.util.MeshLogger
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -28,20 +30,29 @@ class BleGattClient(
     private val onStateChanged: (ClientConnectionState) -> Unit
 ) {
     private var gatt: BluetoothGatt? = null
-    private val writeQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val writeQueue = java.util.concurrent.ConcurrentLinkedDeque<ByteArray>()
     private val writeInFlight = AtomicBoolean(false)
+    private val servicesDiscoveryStarted = AtomicBoolean(false)
     private var negotiatedMtu = GattProfile.DEFAULT_ATT_PAYLOAD_SIZE + 3
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var writeTimeoutRunnable: Runnable? = null
 
     val mtuPayloadSize: Int get() = negotiatedMtu - 3
 
     @SuppressLint("MissingPermission")
     fun connect() {
+        servicesDiscoveryStarted.set(false)
         onStateChanged(ClientConnectionState.CONNECTING)
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
+        servicesDiscoveryStarted.set(false)
+        writeTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        writeTimeoutRunnable = null
+        writeQueue.clear()
+        writeInFlight.set(false)
         try {
             gatt?.disconnect()
             gatt?.close()
@@ -79,27 +90,72 @@ class BleGattClient(
     @Suppress("DEPRECATION")
     @SuppressLint("MissingPermission")
     private fun writeCharacteristicCompat(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-        // See the note in BleGattServer re: deprecated setValue/writeCharacteristic pair -
-        // kept for minSdk 26 compatibility; the callback-based flow is identical either way.
-        characteristic.value = value
-        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        val started = g.writeCharacteristic(characteristic)
-        if (!started) {
+        val writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        val started = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val res = g.writeCharacteristic(characteristic, value, writeType)
+            if (res != android.bluetooth.BluetoothStatusCodes.SUCCESS) {
+                logger.warn("BLE", "writeCharacteristic (API 33+) failed with status $res for ${device.address}")
+                false
+            } else {
+                true
+            }
+        } else {
+            characteristic.value = value
+            characteristic.writeType = writeType
+            val ok = g.writeCharacteristic(characteristic)
+            if (!ok) {
+                logger.warn("BLE", "writeCharacteristic failed to start for ${device.address}")
+            }
+            ok
+        }
+
+        if (started) {
+            writeTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+            val timeoutRunnable = Runnable {
+                if (writeInFlight.compareAndSet(true, false)) {
+                    logger.warn("BLE", "Write timeout (1500ms) on ${device.address}; clearing writeInFlight")
+                    drainQueueIfIdle()
+                }
+            }
+            writeTimeoutRunnable = timeoutRunnable
+            mainHandler.postDelayed(timeoutRunnable, 1500L)
+        } else {
+            writeQueue.addFirst(value)
             writeInFlight.set(false)
-            logger.warn("BLE", "writeCharacteristic failed to start for ${device.address}")
+            mainHandler.postDelayed({ drainQueueIfIdle() }, 50L)
         }
     }
 
-    private val gattCallback = object : BluetoothGattCallback() {
+    private val gattCallback = createGattCallback()
+
+    @SuppressLint("MissingPermission")
+    private fun proceedToServiceDiscovery(g: BluetoothGatt) {
+        if (servicesDiscoveryStarted.compareAndSet(false, true)) {
+            g.discoverServices()
+        }
+    }
+
+    internal fun createGattCallback(): BluetoothGattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    logger.debug("BLE", "GATT client connected to ${device.address}, discovering services")
-                    g.requestMtu(GattProfile.REQUESTED_MTU)
+                    logger.debug("BLE", "GATT client connected to ${device.address}, requesting MTU")
+                    servicesDiscoveryStarted.set(false)
+                    val started = try {
+                        g.requestMtu(GattProfile.REQUESTED_MTU)
+                    } catch (e: Exception) {
+                        logger.warn("BLE", "requestMtu exception for ${device.address}: ${e.message}")
+                        false
+                    }
+                    if (!started) {
+                        logger.warn("BLE", "requestMtu failed to start for ${device.address}, falling back to discoverServices")
+                        proceedToServiceDiscovery(g)
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     logger.debug("BLE", "GATT client disconnected from ${device.address} (status=$status)")
+                    servicesDiscoveryStarted.set(false)
                     onStateChanged(ClientConnectionState.DISCONNECTED)
                 }
             }
@@ -110,8 +166,10 @@ class BleGattClient(
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 negotiatedMtu = mtu
                 logger.debug("BLE", "MTU negotiated: $mtu with ${device.address}")
+            } else {
+                logger.warn("BLE", "MTU negotiation failed with status=$status on ${device.address}")
             }
-            g.discoverServices()
+            proceedToServiceDiscovery(g)
         }
 
         @SuppressLint("MissingPermission")
@@ -132,13 +190,30 @@ class BleGattClient(
             val cccd = txCharacteristic.getDescriptor(GattProfile.CCCD_UUID)
             if (cccd != null) {
                 writeDescriptorCompat(g, cccd)
+            } else {
+                onStateChanged(ClientConnectionState.CONNECTED)
+                logger.info("BLE", "Connected and ready (no CCCD): ${device.address}")
             }
-            onStateChanged(ClientConnectionState.CONNECTED)
-            logger.info("BLE", "Connected and ready: ${device.address}")
+        }
+
+        @Suppress("DEPRECATION")
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (descriptor.uuid == GattProfile.CCCD_UUID) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    logger.info("BLE", "CCCD notifications registered for ${device.address}")
+                } else {
+                    logger.warn("BLE", "CCCD write failed with status=$status on ${device.address}")
+                }
+                onStateChanged(ClientConnectionState.CONNECTED)
+                logger.info("BLE", "Connected and ready: ${device.address}")
+            }
         }
 
         @Suppress("DEPRECATION")
         override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            writeTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+            writeTimeoutRunnable = null
             writeInFlight.set(false)
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 logger.warn("BLE", "Write failed to ${device.address}: status=$status")
@@ -146,10 +221,25 @@ class BleGattClient(
             drainQueueIfIdle()
         }
 
-        @Suppress("DEPRECATION")
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid == GattProfile.CHARACTERISTIC_TX_UUID) {
-                onFragmentReceived(characteristic.value ?: return)
+                val bytes = characteristic.value
+                if (bytes != null && bytes.isNotEmpty()) {
+                    onFragmentReceived(bytes)
+                }
+            }
+        }
+
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (characteristic.uuid == GattProfile.CHARACTERISTIC_TX_UUID) {
+                if (value.isNotEmpty()) {
+                    onFragmentReceived(value)
+                }
             }
         }
     }
@@ -157,7 +247,17 @@ class BleGattClient(
     @Suppress("DEPRECATION")
     @SuppressLint("MissingPermission")
     private fun writeDescriptorCompat(g: BluetoothGatt, descriptor: BluetoothGattDescriptor) {
-        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        g.writeDescriptor(descriptor)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val res = g.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            if (res != android.bluetooth.BluetoothStatusCodes.SUCCESS) {
+                logger.warn("BLE", "writeDescriptor (API 33+) failed with status $res for ${device.address}")
+            }
+        } else {
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            val ok = g.writeDescriptor(descriptor)
+            if (!ok) {
+                logger.warn("BLE", "writeDescriptor failed to start for ${device.address}")
+            }
+        }
     }
 }
