@@ -35,12 +35,12 @@ fun RelayScreen(viewModel: AppViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text("Relay Mode", fontWeight = FontWeight.Bold)
+                Column(Modifier.weight(1f)) {
+                    Text("Intermediate Relay Mode", fontWeight = FontWeight.Bold)
                     Text(
-                        "Allow this device to relay encrypted traffic for other nearby " +
-                            "participating devices. This device can never see the contents.",
-                        style = MaterialTheme.typography.labelSmall
+                        "When enabled, this phone acts as an intermediate node forwarding mesh packets between other nodes without seeing data. When disabled, this node only acts as a terminal source/destination.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(checked = settings.relayModeEnabled, onCheckedChange = { viewModel.setRelayModeEnabled(it) })

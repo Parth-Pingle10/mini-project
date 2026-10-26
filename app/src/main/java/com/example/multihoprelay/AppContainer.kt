@@ -1,7 +1,7 @@
 package com.example.multihoprelay
 
 import android.content.Context
-import com.example.multihoprelay.bluetooth.BleConnectionManager
+import com.example.multihoprelay.nearby.NearbyConnectionManager
 import com.example.multihoprelay.crypto.KeyManager
 import com.example.multihoprelay.crypto.KeyManagerIdentityProvider
 import com.example.multihoprelay.data.database.AppDatabase
@@ -12,20 +12,26 @@ import com.example.multihoprelay.networking.RelayManager
 import com.example.multihoprelay.networking.RoutingManager
 import com.example.multihoprelay.networking.TransferManager
 import com.example.multihoprelay.util.MeshLogger
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
  * Hand-rolled dependency container (no DI framework needed for a project this size). Lives
  * for the process lifetime, created once in [MultiHopRelayApp]. Owns the single, real
- * [BleConnectionManager]-backed mesh stack that all screens observe.
+ * [NearbyConnectionManager]-backed mesh stack that all screens observe.
  */
 class AppContainer(private val context: Context) {
 
-    val appScope = CoroutineScope(SupervisorJob())
-
     val logger = MeshLogger()
+
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        logger.error("APP", "Uncaught coroutine error: ${throwable.message ?: throwable.javaClass.simpleName}")
+    }
+
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + exceptionHandler)
     val keyManager = KeyManager(context)
     val settingsRepository = SettingsRepository(context)
     val database = AppDatabase.getInstance(context)
@@ -43,37 +49,56 @@ class AppContainer(private val context: Context) {
 
     private val identityProvider by lazy { KeyManagerIdentityProvider(keyManager) }
 
-    private var _connectionManager: BleConnectionManager? = null
+    private var _connectionManager: NearbyConnectionManager? = null
     private var _routingManager: RoutingManager? = null
     private var _relayManager: RelayManager? = null
     private var _transferManager: TransferManager? = null
 
-    val connectionManager: BleConnectionManager
-        get() = _connectionManager ?: buildMeshStack().connectionManager
+    val connectionManager: NearbyConnectionManager
+        get() = _connectionManager ?: getOrCreateMeshStack().connectionManager
 
     val routingManager: RoutingManager
-        get() = _routingManager ?: buildMeshStack().routingManager
+        get() = _routingManager ?: getOrCreateMeshStack().routingManager
 
     val relayManager: RelayManager
-        get() = _relayManager ?: buildMeshStack().relayManager
+        get() = _relayManager ?: getOrCreateMeshStack().relayManager
 
     val transferManager: TransferManager
-        get() = _transferManager ?: buildMeshStack().transferManager
+        get() = _transferManager ?: getOrCreateMeshStack().transferManager
 
     private data class MeshStack(
-        val connectionManager: BleConnectionManager,
+        val connectionManager: NearbyConnectionManager,
         val routingManager: RoutingManager,
         val relayManager: RelayManager,
         val transferManager: TransferManager
     )
 
-    private fun buildMeshStack(): MeshStack {
+    private fun getOrCreateMeshStack(): MeshStack {
+        val existingConn = _connectionManager
+        val existingRouting = _routingManager
+        val existingRelay = _relayManager
+        val existingTransfer = _transferManager
+        if (existingConn != null && existingRouting != null && existingRelay != null && existingTransfer != null) {
+            return MeshStack(existingConn, existingRouting, existingRelay, existingTransfer)
+        }
         val nodeId = ensureIdentity()
-        val connMgr = BleConnectionManager(context, nodeId, appScope, logger)
-        val routing = RoutingManager(connMgr, identityProvider, appScope, logger)
-        val relay = RelayManager(connMgr, routing, database.relayQueueDao(), settingsRepository.relaySettingsFlow, appScope, logger)
-        val transfer = TransferManager(connMgr, routing, identityProvider, database.transferDao(), fileStorage, appScope, logger)
-        connMgr.setOnNeighborLostListener { lostNodeId -> routing.onNeighborLost(lostNodeId) }
+        val connMgr = existingConn ?: NearbyConnectionManager(
+            context,
+            nodeId,
+            appScope,
+            logger
+        )
+        val routing = existingRouting ?: RoutingManager(connMgr, identityProvider, appScope, logger)
+        val relay = existingRelay ?: RelayManager(connMgr, routing, database.relayQueueDao(), settingsRepository.relaySettingsFlow, appScope, logger)
+        val transfer = existingTransfer ?: TransferManager(connMgr, routing, identityProvider, database.transferDao(), fileStorage, appScope, logger, context = context)
+        connMgr.setOnNeighborLostListener { lostNodeId ->
+            routing.onNeighborLost(lostNodeId)
+            transfer.onNeighborLost(lostNodeId)
+        }
+        connMgr.setOnNeighborConnectedListener { connectedNodeId ->
+            connMgr.getDeviceName(connectedNodeId)?.let { routing.registerDeviceName(connectedNodeId, it) }
+            routing.onNeighborDiscovered(connectedNodeId)
+        }
         _connectionManager = connMgr
         _routingManager = routing
         _relayManager = relay
@@ -87,7 +112,7 @@ class AppContainer(private val context: Context) {
     fun startMesh() {
         if (meshStarted) return
         meshStarted = true
-        val stack = buildMeshStack()
+        val stack = getOrCreateMeshStack()
         stack.connectionManager.start()
         stack.routingManager.start()
         stack.relayManager.start()
@@ -106,6 +131,7 @@ class AppContainer(private val context: Context) {
         _connectionManager?.stop()
         _routingManager?.stop()
         _relayManager?.stop()
+        _transferManager?.stop()
         logger.info("APP", "Mesh stack stopped")
     }
 

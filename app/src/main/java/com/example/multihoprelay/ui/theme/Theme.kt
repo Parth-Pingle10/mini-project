@@ -12,20 +12,40 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
-private val PurplePrimary = Color(0xFF6650A4)
-private val PurpleSecondary = Color(0xFF625B71)
-private val Teal = Color(0xFF03DAC5)
+private val IndigoPrimary = Color(0xFF4F46E5)
+private val IndigoSecondary = Color(0xFF6366F1)
+private val CyanTertiary = Color(0xFF06B6D4)
 
 private val LightColors = lightColorScheme(
-    primary = PurplePrimary,
-    secondary = PurpleSecondary,
-    tertiary = Teal
+    primary = IndigoPrimary,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFEEF2FF),
+    onPrimaryContainer = Color(0xFF312E81),
+    secondary = IndigoSecondary,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE0E7FF),
+    onSecondaryContainer = Color(0xFF3730A3),
+    tertiary = CyanTertiary,
+    background = Color(0xFFF8FAFC),
+    surface = Color.White,
+    surfaceVariant = Color(0xFFF1F5F9),
+    onSurface = Color(0xFF0F172A),
+    onSurfaceVariant = Color(0xFF475569)
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFFD0BCFF),
-    secondary = Color(0xFFCCC2DC),
-    tertiary = Color(0xFFEFB8C8)
+    primary = Color(0xFF818CF8),
+    onPrimary = Color(0xFF1E1B4B),
+    primaryContainer = Color(0xFF312E81),
+    onPrimaryContainer = Color(0xFFE0E7FF),
+    secondary = Color(0xFFA5B4FC),
+    onSecondary = Color(0xFF1E1B4B),
+    tertiary = Color(0xFF67E8F9),
+    background = Color(0xFF0F172A),
+    surface = Color(0xFF1E293B),
+    surfaceVariant = Color(0xFF334155),
+    onSurface = Color(0xFFF8FAFC),
+    onSurfaceVariant = Color(0xFF94A3B8)
 )
 
 @Composable

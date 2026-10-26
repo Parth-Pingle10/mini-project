@@ -7,14 +7,20 @@ import com.example.multihoprelay.AppContainer
 import com.example.multihoprelay.data.database.entity.TransferEntity
 import com.example.multihoprelay.data.settings.RelaySettings
 import com.example.multihoprelay.model.NodeId
+import com.example.multihoprelay.model.PendingIncomingTransfer
 import com.example.multihoprelay.model.Route
 import com.example.multihoprelay.model.TransferDirection
 import com.example.multihoprelay.model.TransferInfo
 import com.example.multihoprelay.model.TransferState
 import com.example.multihoprelay.networking.RelayStats
 import com.example.multihoprelay.util.LogEntry
+import com.example.multihoprelay.model.ReachableNode
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -24,6 +30,38 @@ import java.util.UUID
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val container: AppContainer = (application as com.example.multihoprelay.MultiHopRelayApp).container
+
+    val pendingIncomingRequest: StateFlow<PendingIncomingTransfer?> by lazy {
+        container.transferManager.pendingIncomingRequest
+    }
+
+    val pendingIncomingConnection: StateFlow<com.example.multihoprelay.model.PendingIncomingConnection?> by lazy {
+        container.connectionManager.pendingIncomingConnection
+    }
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _preselectedDestination = MutableStateFlow<NodeId?>(null)
+    val preselectedDestination: StateFlow<NodeId?> = _preselectedDestination.asStateFlow()
+
+    fun selectDestination(destination: NodeId) {
+        _preselectedDestination.value = destination
+    }
+
+    fun clearPreselectedDestination() {
+        _preselectedDestination.value = null
+    }
+
+    init {
+        viewModelScope.launch {
+            container.transferManager.pendingIncomingRequest.collect { req ->
+                if (req != null) {
+                    container.logger.info("TRANSFER", "INCOMING_REQUEST_COLLECTED: transferId=${req.transferId} file=${req.fileName}")
+                }
+            }
+        }
+    }
 
     val nodeId: NodeId get() = container.nodeId()
     val publicKeyBase64: String get() = container.keyManager.getPublicKeyBase64()
@@ -36,8 +74,97 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         container.connectionManager.isScanning
     }
 
+    val reachableNodes: StateFlow<List<ReachableNode>> by lazy {
+        combine(
+            container.connectionManager.neighbors,
+            container.routingManager.routesFlow
+        ) { neighborsList, routesMap ->
+            val result = mutableListOf<ReachableNode>()
+            val processedNodeIds = mutableSetOf<NodeId>()
+
+            // 1. Direct neighbors from Nearby Connections
+            neighborsList.filter { it.nodeId != nodeId }.forEach { neighbor ->
+                val devName = container.connectionManager.getDeviceName(neighbor.nodeId)
+                    ?: container.routingManager.getKnownDeviceName(neighbor.nodeId)
+                    ?: ""
+                val isConnected = neighbor.isConnected
+                result.add(
+                    ReachableNode(
+                        nodeId = neighbor.nodeId,
+                        deviceName = devName,
+                        isDirect = true,
+                        isConnected = isConnected,
+                        nextHop = neighbor.nodeId,
+                        hopCount = 1,
+                        fullPath = listOf(nodeId, neighbor.nodeId),
+                        isAvailable = isConnected
+                    )
+                )
+                processedNodeIds.add(neighbor.nodeId)
+            }
+
+            // 2. Multi-hop reachable nodes from route advertisements
+            val now = System.currentTimeMillis()
+            routesMap.forEach { (destNode, route) ->
+                if (destNode != nodeId && !processedNodeIds.contains(destNode)) {
+                    val devName = container.routingManager.getKnownDeviceName(destNode) ?: ""
+                    val isExpired = route.isExpired(now, Route.DEFAULT_ROUTE_TTL_MILLIS)
+                    val isNextHopConnected = neighborsList.any { it.nodeId == route.nextHop && it.isConnected }
+                    val isAvailable = !isExpired && isNextHopConnected
+                    result.add(
+                        ReachableNode(
+                            nodeId = destNode,
+                            deviceName = devName,
+                            isDirect = false,
+                            isConnected = isAvailable,
+                            nextHop = route.nextHop,
+                            hopCount = route.hopCount,
+                            fullPath = route.fullPath,
+                            isAvailable = isAvailable
+                        )
+                    )
+                    processedNodeIds.add(destNode)
+                }
+            }
+            result
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+
     fun refreshNearbyDevices() {
         container.connectionManager.refreshDiscovery()
+    }
+
+    fun refreshAll() {
+        if (_isRefreshing.value) return
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                container.logger.info("REFRESH", "Refresh initiated: Nearby discovery + route advertisements")
+                container.connectionManager.refreshDiscovery()
+                container.routingManager.pruneExpiredRoutesNow()
+                container.routingManager.broadcastRouteAdvertisement()
+                delay(1200L)
+            } catch (e: Exception) {
+                container.logger.warn("REFRESH", "Refresh encountered error: ${e.message}")
+            } finally {
+                _isRefreshing.value = false
+                container.logger.info("REFRESH", "Refresh completed")
+            }
+        }
+    }
+
+    fun connectToNeighbor(nodeId: NodeId): Boolean =
+        container.connectionManager.connectToNeighbor(nodeId)
+
+    fun disconnectFromNeighbor(nodeId: NodeId): Boolean =
+        container.connectionManager.disconnectFromNeighbor(nodeId)
+
+    fun acceptIncomingConnection(endpointId: String) {
+        container.connectionManager.acceptConnection(endpointId)
+    }
+
+    fun rejectIncomingConnection(endpointId: String) {
+        container.connectionManager.rejectConnection(endpointId)
     }
 
     val routes: StateFlow<Map<NodeId, Route>> by lazy {
@@ -54,6 +181,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val logs: StateFlow<List<LogEntry>> get() = container.logger.entries
+
+    fun logInfo(tag: String, message: String) = container.logger.info(tag, message)
 
     fun startMesh() = container.startMesh()
     fun stopMesh() = container.stopMesh()
@@ -101,14 +230,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun sendFile(destination: NodeId, file: File, fileName: String): UUID =
         container.transferManager.startSend(destination, file, fileName)
 
+    fun acceptIncomingTransfer(transferId: UUID) {
+        viewModelScope.launch {
+            container.transferManager.acceptIncomingTransfer(transferId)
+        }
+    }
+
+    fun rejectIncomingTransfer(transferId: UUID) {
+        viewModelScope.launch {
+            container.transferManager.rejectIncomingTransfer(transferId)
+        }
+    }
+
     fun cancelTransfer(transferId: UUID) = container.transferManager.cancelTransfer(transferId)
 
     private fun TransferEntity.toTransferInfo(): TransferInfo {
-        val route = if (routeCsv.isBlank()) emptyList() else routeCsv.split(",").map { NodeId.fromString(it) }
+        val route = if (routeCsv.isBlank()) {
+            emptyList()
+        } else {
+            routeCsv.split(",").mapNotNull { NodeId.fromStringOrNull(it.trim()) }
+        }
+        val safePeerId = NodeId.fromStringOrNull(peerNodeId) ?: NodeId("00000000")
+        val safeTransferId = try { UUID.fromString(transferId) } catch (_: Exception) { UUID.randomUUID() }
         return TransferInfo(
-            transferId = UUID.fromString(transferId),
+            transferId = safeTransferId,
             direction = direction,
-            peerNodeId = NodeId.fromString(peerNodeId),
+            peerNodeId = safePeerId,
             fileName = fileName,
             fileSizeBytes = fileSizeBytes,
             totalChunks = totalChunks,
@@ -117,7 +264,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             route = route,
             createdAtMillis = createdAtMillis,
             updatedAtMillis = updatedAtMillis,
-            errorMessage = errorMessage
+            errorMessage = errorMessage,
+            outputFilePath = outputFilePath
         )
     }
 }

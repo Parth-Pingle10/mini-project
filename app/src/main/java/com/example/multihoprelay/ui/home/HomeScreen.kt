@@ -43,43 +43,76 @@ fun HomeScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit, onRequestP
     val bluetoothEnabled = BlePermissions.isBluetoothEnabled(context)
     val hasPermissions = BlePermissions.hasAllPermissions(context)
 
+    val routes by viewModel.routes.collectAsState()
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Node Profile Header
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("My Node", style = MaterialTheme.typography.labelSmall)
-                    Text(viewModel.nodeId.value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = androidx.compose.material3.CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Text(
+                        "THIS DEVICE",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        viewModel.nodeId.value,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Text(
+                        if (relaySettings.relayModeEnabled) "Role: Intermediate Node (Forwarding + Terminal)"
+                        else "Role: Terminal Node (Source / Destination)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
                 }
             }
         }
 
+        // Live Status
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Mesh Status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     StatusRow(
                         icon = if (bluetoothEnabled) Icons.Filled.Bluetooth else Icons.Filled.BluetoothDisabled,
-                        label = "Bluetooth",
-                        value = if (bluetoothEnabled) "Enabled" else "Disabled",
+                        label = "Bluetooth Radio",
+                        value = if (bluetoothEnabled) "Ready" else "Disabled",
                         good = bluetoothEnabled
                     )
                     StatusRow(
                         icon = Icons.Filled.Devices,
-                        label = "Relay Mode",
-                        value = if (relaySettings.relayModeEnabled) "ON" else "OFF",
+                        label = "Relay Forwarding",
+                        value = if (relaySettings.relayModeEnabled) "Active" else "Disabled",
                         good = relaySettings.relayModeEnabled
                     )
                     StatusRow(
                         icon = Icons.Filled.Wifi,
-                        label = "Nearby Nodes",
-                        value = neighbors.size.toString(),
-                        good = neighbors.isNotEmpty()
+                        label = "Connected 1-Hop Neighbors",
+                        value = neighbors.count { it.isConnected }.toString(),
+                        good = neighbors.any { it.isConnected }
+                    )
+                    StatusRow(
+                        icon = Icons.Filled.List,
+                        label = "Total Mesh Paths Known",
+                        value = routes.size.toString(),
+                        good = routes.isNotEmpty()
                     )
                     if (!hasPermissions) {
-                        Button(onClick = onRequestPermissions, modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = onRequestPermissions, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                             Text("Grant Bluetooth Permissions")
                         }
                     }
@@ -88,15 +121,15 @@ fun HomeScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit, onRequestP
         }
 
         item {
-            Text("Actions", style = MaterialTheme.typography.titleLarge)
+            Text("Quick Actions", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
 
         items(
             listOf(
                 Triple("Send File", Icons.Filled.Send, Screen.Send.route),
-                Triple("Nearby Devices", Icons.Filled.Wifi, Screen.Nearby.route),
-                Triple("Transfers", Icons.Filled.List, Screen.Transfers.route),
-                Triple("Relay", Icons.Filled.Devices, Screen.Relay.route),
+                Triple("Nearby & Mesh Devices", Icons.Filled.Wifi, Screen.Nearby.route),
+                Triple("Transfer History", Icons.Filled.List, Screen.Transfers.route),
+                Triple("Node Role / Relay", Icons.Filled.Devices, Screen.Relay.route),
                 Triple("Settings", Icons.Filled.Settings, Screen.Settings.route)
             )
         ) { (label, icon, route) ->
@@ -107,10 +140,10 @@ fun HomeScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit, onRequestP
                 Row(
                     modifier = Modifier.padding(16.dp),
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Icon(icon, contentDescription = null)
-                    Text(label)
+                    Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                 }
             }
         }

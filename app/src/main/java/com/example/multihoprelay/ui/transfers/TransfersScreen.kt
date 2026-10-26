@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.model.TransferDirection
 import com.example.multihoprelay.model.TransferInfo
+import com.example.multihoprelay.model.TransferState
 import com.example.multihoprelay.ui.AppViewModel
 
 @Composable
@@ -42,7 +43,12 @@ fun TransfersScreen(viewModel: AppViewModel) {
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(transfers, key = { it.transferId }) { transfer ->
-                    TransferCard(transfer, onCancel = { viewModel.cancelTransfer(transfer.transferId) })
+                    TransferCard(
+                        info = transfer,
+                        onAccept = { viewModel.acceptIncomingTransfer(transfer.transferId) },
+                        onReject = { viewModel.rejectIncomingTransfer(transfer.transferId) },
+                        onCancel = { viewModel.cancelTransfer(transfer.transferId) }
+                    )
                 }
             }
         }
@@ -50,7 +56,12 @@ fun TransfersScreen(viewModel: AppViewModel) {
 }
 
 @Composable
-private fun TransferCard(info: TransferInfo, onCancel: () -> Unit) {
+private fun TransferCard(
+    info: TransferInfo,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+    onCancel: () -> Unit
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -60,17 +71,104 @@ private fun TransferCard(info: TransferInfo, onCancel: () -> Unit) {
             Text(
                 if (info.direction == TransferDirection.OUTGOING) "To: ${info.peerNodeId.value}" else "From: ${info.peerNodeId.value}"
             )
+            Text(
+                "Size: ${com.example.multihoprelay.util.FormatUtils.formatFileSize(info.fileSizeBytes)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             LinearProgressIndicator(progress = { info.progressFraction }, modifier = Modifier.fillMaxWidth())
-            Text("Status: ${info.state}  (${info.chunksDone}/${info.totalChunks} chunks)")
+            Text(
+                "Status: ${com.example.multihoprelay.util.FormatUtils.formatTransferState(info.state)}  (${info.chunksDone}/${info.totalChunks} chunks)",
+                style = MaterialTheme.typography.bodySmall
+            )
             if (info.route.isNotEmpty()) {
                 Text("Route: ${info.route.joinToString(" -> ") { it.value }}", style = MaterialTheme.typography.labelSmall)
             }
             info.errorMessage?.let {
                 Text("Error: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
             }
-            if (!info.state.isTerminal) {
+
+            if (info.direction == TransferDirection.INCOMING && info.state == TransferState.PENDING_APPROVAL) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    androidx.compose.material3.Button(
+                        onClick = onAccept,
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = androidx.compose.ui.graphics.Color(0xFF2E7D32)
+                        )
+                    ) {
+                        Text("Allow")
+                    }
+                    OutlinedButton(onClick = onReject) {
+                        Text("Reject")
+                    }
+                }
+            } else if (!info.state.isTerminal) {
                 OutlinedButton(onClick = onCancel) { Text("Cancel") }
             }
+
+            if (info.state == TransferState.COMPLETED && !info.outputFilePath.isNullOrBlank()) {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                val file = java.io.File(info.outputFilePath)
+                if (file.exists()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        androidx.compose.material3.Button(
+                            onClick = { openFile(context, file) },
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("Open File")
+                        }
+                        OutlinedButton(
+                            onClick = { shareFile(context, file) },
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("Share")
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+private fun openFile(context: android.content.Context, file: java.io.File) {
+    try {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+        val mimeType = context.contentResolver.getType(uri) ?: "*/*"
+        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(android.content.Intent.createChooser(intent, "Open file with"))
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "Cannot open file: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun shareFile(context: android.content.Context, file: java.io.File) {
+    try {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+        val mimeType = context.contentResolver.getType(uri) ?: "*/*"
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = mimeType
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(android.content.Intent.createChooser(intent, "Share file via"))
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "Cannot share file: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
     }
 }
