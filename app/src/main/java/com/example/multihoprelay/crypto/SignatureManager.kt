@@ -16,31 +16,47 @@ import java.security.spec.PSSParameterSpec
  */
 class SignatureManager {
 
-    private fun pssSignature(): Signature {
-        val sig = Signature.getInstance("RSASSA-PSS")
-        sig.setParameter(
-            PSSParameterSpec(
-                "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1
-            )
-        )
-        return sig
-    }
+    private val algorithms = listOf("SHA256withRSA/PSS", "RSASSA-PSS")
+    private val saltLengths = listOf(32, 20)
 
     fun sign(privateKey: PrivateKey, data: ByteArray): ByteArray {
-        val sig = pssSignature()
-        sig.initSign(privateKey)
-        sig.update(data)
-        return sig.sign()
+        var lastException: Exception? = null
+        for (algo in algorithms) {
+            try {
+                val sig = Signature.getInstance(algo)
+                try {
+                    sig.setParameter(PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1))
+                } catch (_: Exception) {}
+                sig.initSign(privateKey)
+                sig.update(data)
+                return sig.sign()
+            } catch (e: Exception) {
+                lastException = e
+            }
+        }
+        throw lastException ?: IllegalStateException("Failed to sign data")
     }
 
     fun verify(publicKey: PublicKey, data: ByteArray, signature: ByteArray): Boolean {
-        return try {
-            val sig = pssSignature()
-            sig.initVerify(publicKey)
-            sig.update(data)
-            sig.verify(signature)
-        } catch (e: Exception) {
-            false
+        for (algo in algorithms) {
+            for (saltLen in saltLengths) {
+                try {
+                    val sig = Signature.getInstance(algo)
+                    try {
+                        sig.setParameter(PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, saltLen, 1))
+                    } catch (_: Exception) {}
+                    sig.initVerify(publicKey)
+                    sig.update(data)
+                    if (sig.verify(signature)) return true
+                } catch (_: Exception) {}
+            }
+            try {
+                val sig = Signature.getInstance(algo)
+                sig.initVerify(publicKey)
+                sig.update(data)
+                if (sig.verify(signature)) return true
+            } catch (_: Exception) {}
         }
+        return false
     }
 }
