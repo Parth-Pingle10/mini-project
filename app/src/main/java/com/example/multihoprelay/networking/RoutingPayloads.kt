@@ -128,6 +128,88 @@ data class RouteErrorPayload(val unreachableNode: NodeId, val reporterNode: Node
     }
 }
 
+/** Single entry in a route advertisement representing reachability to a destination. */
+data class RouteAdvertisementEntry(
+    val destinationNodeId: NodeId,
+    val deviceName: String,
+    val hopCount: Int,
+    val isAvailable: Boolean = true,
+    val publicKey: ByteArray = ByteArray(0)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is RouteAdvertisementEntry) return false
+        return destinationNodeId == other.destinationNodeId &&
+            deviceName == other.deviceName &&
+            hopCount == other.hopCount &&
+            isAvailable == other.isAvailable &&
+            publicKey.contentEquals(other.publicKey)
+    }
+
+    override fun hashCode(): Int = destinationNodeId.hashCode()
+}
+
+/**
+ * Route advertisement payload exchanged periodically and on topology changes.
+ * Propagates reachable node identities, device names, hop counts, and public keys
+ * across intermediate relay nodes without broadcast storms.
+ */
+data class RouteAdvertisementPayload(
+    val sequenceNumber: Long,
+    val advertiserNode: NodeId,
+    val entries: List<RouteAdvertisementEntry>
+) {
+    fun encode(): ByteArray {
+        var estimatedSize = 8 + NodeId.LENGTH + 4
+        entries.forEach { entry ->
+            val nameBytes = entry.deviceName.toByteArray(Charsets.UTF_8)
+            estimatedSize += NodeId.LENGTH + 4 + nameBytes.size + 4 + 1 + 4 + entry.publicKey.size
+        }
+        val buffer = ByteBuffer.allocate(estimatedSize).order(ByteOrder.BIG_ENDIAN)
+        buffer.putLong(sequenceNumber)
+        buffer.put(advertiserNode.value.toByteArray(Charsets.US_ASCII))
+        buffer.putInt(entries.size)
+        entries.forEach { entry ->
+            buffer.put(entry.destinationNodeId.value.toByteArray(Charsets.US_ASCII))
+            val nameBytes = entry.deviceName.toByteArray(Charsets.UTF_8)
+            buffer.putInt(nameBytes.size)
+            buffer.put(nameBytes)
+            buffer.putInt(entry.hopCount)
+            buffer.put(if (entry.isAvailable) 1.toByte() else 0.toByte())
+            buffer.putInt(entry.publicKey.size)
+            buffer.put(entry.publicKey)
+        }
+        return buffer.array()
+    }
+
+    companion object {
+        fun decode(bytes: ByteArray): RouteAdvertisementPayload {
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+            if (bytes.size < 8 + NodeId.LENGTH + 4) throw MalformedPacketException("Truncated RouteAdvertisement")
+            val sequenceNumber = buffer.long
+            val advertiserNode = NodeId(readNodeIdString(buffer))
+            val count = buffer.int
+            if (count < 0 || count > 256) throw MalformedPacketException("Bad entry count in RouteAdvertisement: $count")
+            val list = mutableListOf<RouteAdvertisementEntry>()
+            for (i in 0 until count) {
+                if (buffer.remaining() < NodeId.LENGTH + 4) throw MalformedPacketException("Truncated entry in RouteAdvertisement")
+                val destNode = NodeId(readNodeIdString(buffer))
+                val nameLen = buffer.int
+                if (nameLen < 0 || buffer.remaining() < nameLen) throw MalformedPacketException("Bad device name length")
+                val nameBytes = ByteArray(nameLen).also { buffer.get(it) }
+                val deviceName = String(nameBytes, Charsets.UTF_8)
+                val hopCount = buffer.int
+                val isAvailable = buffer.get().toInt() != 0
+                val keyLen = buffer.int
+                if (keyLen < 0 || buffer.remaining() < keyLen) throw MalformedPacketException("Bad key length in RouteAdvertisement")
+                val pubKey = if (keyLen in 1..2048) ByteArray(keyLen).also { buffer.get(it) } else ByteArray(0)
+                list.add(RouteAdvertisementEntry(destNode, deviceName, hopCount, isAvailable, pubKey))
+            }
+            return RouteAdvertisementPayload(sequenceNumber, advertiserNode, list)
+        }
+    }
+}
+
 private fun readNodeIdString(buffer: ByteBuffer): String {
     val bytes = ByteArray(NodeId.LENGTH)
     buffer.get(bytes)
