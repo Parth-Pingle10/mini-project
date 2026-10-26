@@ -13,12 +13,17 @@ import com.example.multihoprelay.model.ChunkMeta
 import com.example.multihoprelay.model.NodeId
 import com.example.multihoprelay.model.Packet
 import com.example.multihoprelay.model.PacketType
+import com.example.multihoprelay.model.PendingIncomingTransfer
 import com.example.multihoprelay.model.TransferDirection
 import com.example.multihoprelay.model.TransferState
 import com.example.multihoprelay.util.MeshLogger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -55,7 +60,10 @@ class TransferManager(
     private val fileStorage: TransferFileStore,
     private val scope: CoroutineScope,
     private val logger: MeshLogger,
-    private val chunkSize: Int = ChunkManager.DEFAULT_CHUNK_SIZE
+    private val chunkSize: Int = ChunkManager.DEFAULT_CHUNK_SIZE,
+    private val autoAcceptForTesting: Boolean = false,
+    private val acceptanceTimeoutSeconds: Long = 60L,
+    private val context: android.content.Context? = null
 ) {
     private val encryptionManager = EncryptionManager()
     private val signatureManager = SignatureManager()
@@ -63,20 +71,46 @@ class TransferManager(
     // Per-transfer in-memory state not worth persisting on every mutation (raw source file
     // handle for the sender, pending continuation callbacks, etc).
     private val sendJobs = ConcurrentHashMap<UUID, Job>()
-    private val pendingAccept = ConcurrentHashMap<UUID, (Boolean) -> Unit>()
-    private val pendingChunkAcks = ConcurrentHashMap<UUID, MutableSet<Int>>()
+    private val pendingAccept = ConcurrentHashMap<UUID, CompletableDeferred<Boolean>>()
+    private val pendingConfirmations = ConcurrentHashMap<UUID, CompletableDeferred<Boolean>>()
+    private val pendingChunkAcks = ConcurrentHashMap<UUID, ConcurrentHashMap<Int, CompletableDeferred<Unit>>>()
+
+    private val _pendingIncomingRequest = MutableStateFlow<PendingIncomingTransfer?>(null)
+    val pendingIncomingRequest: StateFlow<PendingIncomingTransfer?> = _pendingIncomingRequest.asStateFlow()
+    private val pendingTimeoutJobs = ConcurrentHashMap<UUID, Job>()
+    private val handledTransfers = ConcurrentHashMap.newKeySet<UUID>()
 
     private var incomingJob: Job? = null
 
     fun start() {
         incomingJob = transport.incomingPackets.onEach { packet -> handleIncoming(packet) }.launchIn(scope)
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            transport.fileTransferUpdateListener = { transferId, update, payload ->
+                scope.launch {
+                    handleNearbyPayloadUpdate(transferId, update, payload)
+                }
+            }
+        }
     }
 
     fun stop() {
         sendJobs.values.forEach { it.cancel() }
         sendJobs.clear()
+        pendingAccept.values.forEach { it.cancel() }
+        pendingAccept.clear()
+        pendingConfirmations.values.forEach { it.cancel() }
+        pendingConfirmations.clear()
+        pendingChunkAcks.values.forEach { chunkMap -> chunkMap.values.forEach { it.cancel() } }
+        pendingChunkAcks.clear()
+        pendingTimeoutJobs.values.forEach { it.cancel() }
+        pendingTimeoutJobs.clear()
+        _pendingIncomingRequest.value = null
+        handledTransfers.clear()
         incomingJob?.cancel()
         incomingJob = null
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            transport.fileTransferUpdateListener = null
+        }
     }
 
     // ------------------------------------------------------------------------------------
@@ -86,20 +120,68 @@ class TransferManager(
     /** Kicks off an outgoing transfer of [sourceFile] to [destination]. Returns immediately; observe Room for progress. */
     fun startSend(destination: NodeId, sourceFile: File, fileName: String): UUID {
         val transferId = UUID.randomUUID()
-        sendJobs[transferId] = scope.launch {
-            runSend(transferId, destination, sourceFile, fileName)
+        val job = scope.launch {
+            try {
+                runSend(transferId, destination, sourceFile, fileName)
+            } catch (e: Exception) {
+                logger.error("TRANSFER", "Transfer $transferId crashed with uncaught error: ${e.message}")
+                try {
+                    updateState(transferId, TransferState.FAILED, e.message ?: "Transfer encountered an unhandled error")
+                } catch (dbEx: Exception) {
+                    logger.error("TRANSFER", "Failed to persist FAILED state for transfer $transferId: ${dbEx.message}")
+                }
+            } finally {
+                pendingChunkAcks.remove(transferId)
+                sendJobs.remove(transferId)
+            }
         }
+        sendJobs[transferId] = job
         return transferId
     }
 
     fun cancelTransfer(transferId: UUID) {
         sendJobs[transferId]?.cancel()
+        pendingAccept.remove(transferId)?.complete(false)
+        pendingConfirmations.remove(transferId)?.complete(false)
+        pendingChunkAcks.remove(transferId)?.values?.forEach { it.cancel() }
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
+            transport.cancelFilePayload(transferId)
+        }
         scope.launch {
-            transferDao.getById(transferId.toString())?.let {
-                transferDao.update(it.copy(state = TransferState.CANCELLED, updatedAtMillis = System.currentTimeMillis()))
+            val entity = transferDao.getById(transferId.toString())
+            fileStorage.deleteStaging(transferId)
+            if (entity != null) {
+                transferDao.update(entity.copy(state = TransferState.CANCELLED, updatedAtMillis = System.currentTimeMillis()))
+                sendPacketToward(
+                    NodeId.fromStringOrNull(entity.peerNodeId) ?: destinationNodeIdFallback(entity.peerNodeId),
+                    Packet(
+                        type = PacketType.TRANSFER_CANCEL,
+                        transferId = transferId,
+                        sourceNodeId = identityProvider.nodeId(),
+                        destinationNodeId = NodeId.fromStringOrNull(entity.peerNodeId) ?: destinationNodeIdFallback(entity.peerNodeId)
+                    )
+                )
+            } else {
+                transferDao.upsert(
+                    TransferEntity(
+                        transferId = transferId.toString(),
+                        direction = TransferDirection.OUTGOING,
+                        peerNodeId = "",
+                        fileName = "",
+                        fileSizeBytes = 0,
+                        chunkSizeBytes = chunkSize,
+                        totalChunks = 0,
+                        state = TransferState.CANCELLED,
+                        routeCsv = "",
+                        createdAtMillis = System.currentTimeMillis(),
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                )
             }
         }
     }
+
+    private fun destinationNodeIdFallback(raw: String): NodeId = NodeId.fromStringOrNull(raw) ?: NodeId.BROADCAST
 
     private suspend fun runSend(transferId: UUID, destination: NodeId, sourceFile: File, fileName: String) {
         val self = identityProvider.nodeId()
@@ -115,25 +197,54 @@ class TransferManager(
         updateState(transferId, TransferState.ROUTE_FOUND, route = route.fullPath)
         logger.info("TRANSFER", "Transfer $transferId: route found ${route.fullPath.joinToString(" -> ")}")
 
-        val recipientKeyBytes = routingManager.getKnownPublicKey(destination)
+        var recipientKeyBytes = routingManager.getKnownPublicKey(destination)
         if (recipientKeyBytes == null) {
-            updateState(transferId, TransferState.FAILED, "Recipient public key unknown")
+            delay(1000L)
+            recipientKeyBytes = routingManager.getKnownPublicKey(destination)
+        }
+        if (recipientKeyBytes == null) {
+            logger.warn("TRANSFER", "Transfer $transferId: recipient public key unknown for $destination")
+            updateState(transferId, TransferState.FAILED, "Recipient public key unknown for $destination")
             return
         }
-        val recipientPublicKey = identityProvider.decodePublicKey(recipientKeyBytes)
+        val recipientPublicKey = try {
+            identityProvider.decodePublicKey(recipientKeyBytes)
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Transfer $transferId: failed to decode recipient public key: ${e.message}")
+            updateState(transferId, TransferState.FAILED, "Invalid recipient public key: ${e.message}")
+            return
+        }
 
         updateState(transferId, TransferState.PREPARING)
         val totalChunks = ChunkManager.totalChunks(sourceFile.length(), chunkSize)
-        val fileHash = ChunkManager.fullFileSha256(sourceFile)
-        val chunkMetas = ChunkManager.chunkHashes(sourceFile, totalChunks, chunkSize)
-            .mapIndexed { index, hash -> ChunkMeta(index, hash) }
+        val fileHash = try {
+            ChunkManager.fullFileSha256(sourceFile)
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Transfer $transferId: failed to compute file hash: ${e.message}")
+            updateState(transferId, TransferState.FAILED, "Cannot read file: ${e.message}")
+            return
+        }
+        val chunkMetas = try {
+            ChunkManager.chunkHashes(sourceFile, totalChunks, chunkSize)
+                .mapIndexed { index, hash -> ChunkMeta(index, hash) }
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Transfer $transferId: failed to compute chunk hashes: ${e.message}")
+            updateState(transferId, TransferState.FAILED, "Cannot read file chunks: ${e.message}")
+            return
+        }
         transferDao.upsertChunks(chunkMetas.map {
             TransferChunkEntity(transferId.toString(), it.index, it.sha256, received = false)
         })
 
         updateState(transferId, TransferState.ENCRYPTING)
         val fileKey = encryptionManager.generateFileKey()
-        val wrappedKey = encryptionManager.wrapFileKey(fileKey, recipientPublicKey)
+        val wrappedKey = try {
+            encryptionManager.wrapFileKey(fileKey, recipientPublicKey)
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Transfer $transferId: failed to wrap file key: ${e.message}")
+            updateState(transferId, TransferState.FAILED, "Key wrapping failed: ${e.message}")
+            return
+        }
         persistFileKey(transferId, fileKey)
 
         val initPayload = TransferInitPayload(
@@ -146,23 +257,102 @@ class TransferManager(
             signature = ByteArray(0),
             fileSha256 = fileHash
         )
-        val signature = signatureManager.sign(identityProvider.privateKey(), initPayload.signedBytes())
+        val signature = try {
+            signatureManager.sign(identityProvider.privateKey(), initPayload.signedBytes())
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Transfer $transferId: signature generation failed: ${e.message}")
+            updateState(transferId, TransferState.FAILED, "Signing failed: ${e.message}")
+            return
+        }
         val signedInit = initPayload.copy(signature = signature)
 
-        logger.info("CRYPTO", "Transfer $transferId: file key generated, wrapped for recipient, chunks encrypted per-chunk")
+        logger.info("CRYPTO", "Transfer $transferId: file key generated, wrapped for recipient, chunks ready")
+        logger.info("TRANSFER", "TRANSFER_INIT_CREATED: transferId=$transferId to=$destination file=$fileName size=${sourceFile.length()}")
 
         val accepted = sendControlAndAwaitAccept(transferId, destination, route.nextHop, signedInit)
         if (!accepted) {
-            updateState(transferId, TransferState.FAILED, "Receiver rejected or did not respond")
+            val current = transferDao.getById(transferId.toString())
+            if (current?.state == TransferState.EXPIRED) {
+                logger.info("TRANSFER", "Transfer $transferId: expired by receiver timeout")
+                return
+            }
+            if (current?.state == TransferState.REJECTED) {
+                logger.info("TRANSFER", "Transfer $transferId: receiver explicitly rejected the transfer")
+                return
+            }
+            if (current?.state == TransferState.CANCELLED) {
+                logger.info("TRANSFER", "Transfer $transferId: cancelled by user")
+                return
+            }
+            updateState(transferId, TransferState.EXPIRED, "Transfer request expired — receiver did not respond")
+            logger.warn("TRANSFER", "TRANSFER_TIMEOUT: transferId=$transferId reason=Transfer request expired — receiver did not respond")
             return
         }
 
         updateState(transferId, TransferState.TRANSFERRING)
-        pendingChunkAcks[transferId] = ConcurrentHashMap.newKeySet()
+        val isDirectConnected = transport.neighbors.value.any { it.nodeId == destination && it.isConnected }
+        if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager && isDirectConnected) {
+            logger.info("TRANSFER", "Transfer $transferId: transferring via Nearby Connections native file payload (direct 1-hop link)")
+            val payloadId = transport.sendNearbyFilePayload(destination, transferId, sourceFile)
+            if (payloadId == null) {
+                updateState(transferId, TransferState.FAILED, "Failed to start Nearby file payload transfer")
+                return
+            }
+            val confirmed = awaitTransferConfirmation(transferId, timeoutMillis = 120_000L)
+            if (!confirmed) {
+                val entity = transferDao.getById(transferId.toString())
+                if (entity?.state == TransferState.CANCELLED) return
+                updateState(transferId, TransferState.FAILED, "Receiver did not confirm file validation")
+                return
+            }
+            updateState(transferId, TransferState.COMPLETED)
+            logger.info("TRANSFER", "Transfer $transferId: COMPLETED and confirmed by receiver")
+            return
+        }
 
+        logger.info("TRANSFER", "Transfer $transferId: transferring via multihop chunk relay (${chunkMetas.size} chunks, route: ${route.fullPath.joinToString(" -> ")})")
+        val chunkAcks = ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
+        pendingChunkAcks[transferId] = chunkAcks
+
+        // Flow-controlled chunk-by-chunk sending with bounded retries
         for (meta in chunkMetas) {
-            if (!sendOneChunk(transferId, destination, sourceFile, meta.index, totalChunks, fileKey)) {
-                updateState(transferId, TransferState.FAILED, "Failed to send chunk ${meta.index}")
+            val chunkIndex = meta.index
+            var acked = false
+            var attempts = 0
+            val maxAttempts = 3
+
+            while (!acked && attempts < maxAttempts) {
+                val current = transferDao.getById(transferId.toString())
+                if (current == null || current.state == TransferState.CANCELLED) {
+                    logger.info("TRANSFER", "Transfer $transferId cancelled during chunk $chunkIndex")
+                    return
+                }
+
+                attempts++
+                val ackDeferred = CompletableDeferred<Unit>()
+                chunkAcks[chunkIndex] = ackDeferred
+
+                val sent = sendOneChunk(transferId, destination, sourceFile, chunkIndex, totalChunks, fileKey)
+                if (!sent) {
+                    logger.warn("TRANSFER", "Failed to send chunk $chunkIndex (attempt $attempts/$maxAttempts)")
+                    chunkAcks.remove(chunkIndex)
+                    delay(300L)
+                    continue
+                }
+
+                acked = withTimeoutOrNull(8_000L) {
+                    ackDeferred.await()
+                    true
+                } ?: false
+
+                chunkAcks.remove(chunkIndex)
+                if (!acked) {
+                    logger.warn("TRANSFER", "ACK timeout for chunk $chunkIndex (attempt $attempts/$maxAttempts)")
+                }
+            }
+
+            if (!acked) {
+                updateState(transferId, TransferState.FAILED, "Failed to deliver chunk $chunkIndex after $maxAttempts attempts")
                 return
             }
         }
@@ -176,17 +366,18 @@ class TransferManager(
                 destinationNodeId = destination
             )
         )
-        logger.info("TRANSFER", "Transfer $transferId: all $totalChunks chunks sent, TRANSFER_COMPLETE sent")
+        logger.info("TRANSFER", "Transfer $transferId: all $totalChunks chunks confirmed. TRANSFER_COMPLETE sent, awaiting receiver validation")
 
-        // Give the receiver a window to request retransmission of anything it's missing.
-        val resendHandled = awaitResendOrTimeout(transferId)
-        if (!resendHandled) {
-            updateState(transferId, TransferState.FAILED, "Receiver did not confirm completion")
+        val confirmed = awaitTransferConfirmation(transferId, timeoutMillis = 15_000L)
+        if (!confirmed) {
+            val entity = transferDao.getById(transferId.toString())
+            if (entity?.state == TransferState.CANCELLED) return
+            updateState(transferId, TransferState.FAILED, "Receiver did not confirm file validation")
             return
         }
 
         updateState(transferId, TransferState.COMPLETED)
-        logger.info("TRANSFER", "Transfer $transferId: COMPLETED")
+        logger.info("TRANSFER", "Transfer $transferId: COMPLETED and confirmed by receiver")
     }
 
     private suspend fun sendOneChunk(
@@ -214,19 +405,16 @@ class TransferManager(
         return sent
     }
 
-    private suspend fun awaitResendOrTimeout(
-        transferId: UUID
+    private suspend fun awaitTransferConfirmation(
+        transferId: UUID, timeoutMillis: Long = 15_000L
     ): Boolean {
-        // Simple bounded wait-and-retry loop: give the receiver time to ask for missing chunks.
-        // (destination/sourceFile/totalChunks/fileKey are intentionally not needed here since
-        // any resend is driven reactively by onResendRequest() when a CHUNK_RESEND_REQUEST
-        // arrives; this loop just waits and checks for cancellation.)
-        repeat(3) {
-            delay(4_000L)
-            val entity = transferDao.getById(transferId.toString()) ?: return false
-            if (entity.state == TransferState.CANCELLED) return false
+        val deferred = CompletableDeferred<Boolean>()
+        pendingConfirmations[transferId] = deferred
+        val result = withTimeoutOrNull(timeoutMillis) {
+            deferred.await()
         }
-        return true
+        pendingConfirmations.remove(transferId)
+        return result ?: false
     }
 
     private suspend fun sendControlAndAwaitAccept(
@@ -239,13 +427,23 @@ class TransferManager(
             destinationNodeId = destination,
             payload = initPayload.encode()
         )
-        val result = withTimeoutOrNull(15_000L) {
-            kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
-                pendingAccept[transferId] = { accepted -> if (cont.isActive) cont.resumeWith(Result.success(accepted)) }
-                scope.launch { transport.sendToNeighbor(firstHop, packet) }
-            }
+        val deferred = CompletableDeferred<Boolean>()
+        pendingAccept[transferId] = deferred
+        updateState(transferId, TransferState.WAITING_FOR_APPROVAL)
+        logger.info("TRANSFER", "TRANSFER_INIT_QUEUED: transferId=$transferId to=$destination")
+        val sent = transport.sendToNeighbor(firstHop, packet)
+        if (!sent) {
+            pendingAccept.remove(transferId)
+            logger.warn("TRANSFER", "TRANSFER_FAILED: transferId=$transferId reason=Failed to send TRANSFER_INIT to nextHop $firstHop")
+            return false
+        }
+        val result = withTimeoutOrNull(acceptanceTimeoutSeconds * 1000L) {
+            deferred.await()
         }
         pendingAccept.remove(transferId)
+        if (result == null) {
+            logger.warn("TRANSFER", "TRANSFER_TIMEOUT: transferId=$transferId reason=Sender wait timeout expired (${acceptanceTimeoutSeconds}s)")
+        }
         return result ?: false
     }
 
@@ -254,17 +452,50 @@ class TransferManager(
     // ------------------------------------------------------------------------------------
 
     private suspend fun handleIncoming(packet: Packet) {
-        if (packet.destinationNodeId != identityProvider.nodeId()) return
-        when (packet.type) {
-            PacketType.TRANSFER_INIT -> onTransferInit(packet)
-            PacketType.TRANSFER_ACCEPT -> pendingAccept.remove(packet.transferId)?.invoke(true)
-            PacketType.TRANSFER_REJECT -> pendingAccept.remove(packet.transferId)?.invoke(false)
-            PacketType.CHUNK_DATA -> onChunkData(packet)
-            PacketType.CHUNK_ACK -> onChunkAck(packet)
-            PacketType.TRANSFER_COMPLETE -> onTransferComplete(packet)
-            PacketType.TRANSFER_CANCEL -> onTransferCancel(packet)
-            PacketType.CHUNK_RESEND_REQUEST -> onResendRequest(packet)
-            else -> Unit
+        try {
+            if (packet.destinationNodeId != identityProvider.nodeId()) return
+            when (packet.type) {
+                PacketType.TRANSFER_INIT -> {
+                    logger.info("TRANSFER", "TRANSFER_INIT_RECEIVED: transferId=${packet.transferId} from=${packet.sourceNodeId}")
+                    onTransferInit(packet)
+                }
+                PacketType.TRANSFER_ACCEPT -> {
+                    logger.info("TRANSFER", "TRANSFER_RESPONSE_RECEIVED: transferId=${packet.transferId} response=ACCEPT from=${packet.sourceNodeId}")
+                    pendingAccept.remove(packet.transferId)?.complete(true)
+                }
+                PacketType.TRANSFER_REJECT -> {
+                    val isExpired = packet.payload.isNotEmpty() && String(packet.payload, Charsets.UTF_8) == "EXPIRED"
+                    if (isExpired) {
+                        logger.info("TRANSFER", "TRANSFER_RESPONSE_RECEIVED: transferId=${packet.transferId} response=EXPIRED from=${packet.sourceNodeId}")
+                        logger.warn("TRANSFER", "TRANSFER_TIMEOUT: transferId=${packet.transferId} reason=Transfer request expired — receiver did not respond")
+                        packet.transferId?.let { tid ->
+                            scope.launch {
+                                updateState(tid, TransferState.EXPIRED, "Transfer request expired — receiver did not respond")
+                            }
+                        }
+                    } else {
+                        logger.info("TRANSFER", "TRANSFER_RESPONSE_RECEIVED: transferId=${packet.transferId} response=REJECT from=${packet.sourceNodeId}")
+                        packet.transferId?.let { tid ->
+                            scope.launch {
+                                updateState(tid, TransferState.REJECTED, "Receiver rejected the transfer request")
+                            }
+                        }
+                    }
+                    pendingAccept.remove(packet.transferId)?.complete(false)
+                    pendingConfirmations.remove(packet.transferId)?.complete(false)
+                }
+                PacketType.CHUNK_DATA -> onChunkData(packet)
+                PacketType.CHUNK_ACK -> onChunkAck(packet)
+                PacketType.TRANSFER_COMPLETE -> onTransferComplete(packet)
+                PacketType.TRANSFER_CONFIRM -> {
+                    pendingConfirmations.remove(packet.transferId)?.complete(true)
+                }
+                PacketType.TRANSFER_CANCEL -> onTransferCancel(packet)
+                PacketType.CHUNK_RESEND_REQUEST -> onResendRequest(packet)
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Error handling packet ${packet.type} for transfer ${packet.transferId}: ${e.message}")
         }
     }
 
@@ -276,11 +507,29 @@ class TransferManager(
             logger.warn("TRANSFER", "Malformed TRANSFER_INIT dropped: ${e.message}")
             return
         }
+        logger.info("TRANSFER", "TRANSFER_INIT_DECODED: transferId=$transferId file=${init.fileName} size=${init.fileSizeBytes} chunks=${init.totalChunks}")
+
+        // Avoid re-processing if this transfer is already registered or handled
+        if (handledTransfers.contains(transferId)) {
+            logger.debug("TRANSFER", "Transfer $transferId already handled, ignoring duplicate TRANSFER_INIT")
+            return
+        }
+        val existing = transferDao.getById(transferId.toString())
+        if (existing != null) {
+            logger.debug("TRANSFER", "Transfer $transferId already known in state ${existing.state}, ignoring duplicate TRANSFER_INIT")
+            return
+        }
 
         // Self-certifying identity check: the claimed sender's NodeId must match the hash of
         // the public key actually embedded in this message. A relay cannot forge this without
         // also forging a valid signature below, which it cannot do without the private key.
-        val claimedSenderKey = identityProvider.decodePublicKey(init.senderPublicKey)
+        val claimedSenderKey = try {
+            identityProvider.decodePublicKey(init.senderPublicKey)
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "TRANSFER_INIT rejected: invalid public key: ${e.message}")
+            rejectTransfer(transferId, packet.sourceNodeId)
+            return
+        }
         val derivedNodeId = NodeId.fromPublicKeyBytes(claimedSenderKey.encoded)
         if (derivedNodeId != packet.sourceNodeId) {
             logger.error("TRANSFER", "TRANSFER_INIT rejected: public key does not match claimed source NodeId")
@@ -298,9 +547,7 @@ class TransferManager(
         }
 
         logger.info("TRANSFER", "Transfer $transferId: TRANSFER_INIT from ${packet.sourceNodeId} verified (signature OK)")
-
-        val staging = fileStorage.stagingFileFor(transferId)
-        ChunkManager.preallocate(staging, init.fileSizeBytes)
+        logger.info("TRANSFER", "TRANSFER_INIT_VALIDATED: transferId=$transferId valid=true")
 
         val entity = TransferEntity(
             transferId = transferId.toString(),
@@ -310,36 +557,210 @@ class TransferManager(
             fileSizeBytes = init.fileSizeBytes,
             chunkSizeBytes = init.chunkSizeBytes,
             totalChunks = init.totalChunks,
-            state = TransferState.RECEIVING,
+            state = TransferState.PENDING_APPROVAL,
             routeCsv = "",
             createdAtMillis = System.currentTimeMillis(),
             updatedAtMillis = System.currentTimeMillis(),
-            localFileUri = staging.absolutePath,
+            localFileUri = null,
             fileSha256 = init.fileSha256,
             wrappedFileKeyForReceiver = init.wrappedFileKey,
             senderPublicKeyForReceiver = init.senderPublicKey,
             transferInitSignature = init.signature
         )
+        logger.info("TRANSFER", "INCOMING_REQUEST_CREATED: transferId=$transferId file=${init.fileName}")
         transferDao.upsert(entity)
-        // We don't have plaintext chunk hashes ahead of time on the receiver side from
-        // TRANSFER_INIT alone in this protocol version (only the final file hash), so chunk
-        // rows are created lazily as data arrives; missing-chunk detection instead compares
-        // against totalChunks.
 
-        sendPacketToward(
-            packet.sourceNodeId,
+        val timeoutSecs = acceptanceTimeoutSeconds.toInt()
+        val pendingTransfer = PendingIncomingTransfer(
+            transferId = transferId,
+            peerNodeId = packet.sourceNodeId,
+            fileName = init.fileName,
+            fileSizeBytes = init.fileSizeBytes,
+            totalChunks = init.totalChunks,
+            createdAtMillis = System.currentTimeMillis(),
+            timeoutSeconds = timeoutSecs,
+            remainingSeconds = timeoutSecs
+        )
+        _pendingIncomingRequest.value = pendingTransfer
+        logger.info("TRANSFER", "INCOMING_REQUEST_PUBLISHED: transferId=$transferId state=${TransferState.PENDING_APPROVAL}")
+
+        if (autoAcceptForTesting) {
+            scope.launch { acceptIncomingTransfer(transferId) }
+        } else {
+            logger.info("TRANSFER", "Transfer $transferId: waiting for user approval")
+            val timeoutJob = scope.launch {
+                var remaining = timeoutSecs
+                while (remaining > 0) {
+                    delay(1000L)
+                    remaining--
+                    _pendingIncomingRequest.value?.let { cur ->
+                        if (cur.transferId == transferId) {
+                            _pendingIncomingRequest.value = cur.copy(remainingSeconds = remaining)
+                        }
+                    }
+                }
+                expireIncomingTransfer(transferId, packet.sourceNodeId)
+            }
+            pendingTimeoutJobs[transferId] = timeoutJob
+        }
+    }
+
+    /**
+     * Called when the acceptance countdown expires on the receiver.
+     */
+    suspend fun expireIncomingTransfer(transferId: UUID, sender: NodeId) {
+        if (!handledTransfers.add(transferId)) return
+        pendingTimeoutJobs.remove(transferId)?.cancel()
+        if (_pendingIncomingRequest.value?.transferId == transferId) {
+            _pendingIncomingRequest.value = null
+        }
+        logger.warn("TRANSFER", "TRANSFER_TIMEOUT: transferId=$transferId reason=Receiver acceptance timeout expired")
+        val entity = transferDao.getById(transferId.toString())
+        if (entity != null && entity.state == TransferState.PENDING_APPROVAL) {
+            transferDao.update(
+                entity.copy(
+                    state = TransferState.EXPIRED,
+                    errorMessage = "Transfer request expired — receiver did not respond",
+                    updatedAtMillis = System.currentTimeMillis()
+                )
+            )
+        }
+        fileStorage.deleteStaging(transferId)
+        val sent = sendPacketToward(
+            sender,
+            Packet(
+                type = PacketType.TRANSFER_REJECT,
+                transferId = transferId,
+                sourceNodeId = identityProvider.nodeId(),
+                destinationNodeId = sender,
+                payload = "EXPIRED".toByteArray(Charsets.UTF_8)
+            )
+        )
+        if (sent) {
+            logger.info("TRANSFER", "TRANSFER_RESPONSE_SENT: transferId=$transferId response=EXPIRED to=$sender")
+        }
+    }
+
+    /**
+     * User tapped Allow on the incoming file dialog or card.
+     * Transitions state to RECEIVING, allocates staging file, and transmits TRANSFER_ACCEPT to sender.
+     */
+    suspend fun acceptIncomingTransfer(transferId: UUID) {
+        if (!handledTransfers.add(transferId)) {
+            logger.warn("TRANSFER", "acceptIncomingTransfer: Transfer $transferId was already handled")
+            return
+        }
+        pendingTimeoutJobs.remove(transferId)?.cancel()
+        if (_pendingIncomingRequest.value?.transferId == transferId) {
+            _pendingIncomingRequest.value = null
+        }
+        val entity = transferDao.getById(transferId.toString()) ?: run {
+            logger.warn("TRANSFER", "acceptIncomingTransfer: Unknown transfer $transferId")
+            return
+        }
+        if (entity.direction != TransferDirection.INCOMING || entity.state != TransferState.PENDING_APPROVAL) {
+            logger.warn("TRANSFER", "acceptIncomingTransfer: Transfer $transferId not in PENDING_APPROVAL (current: ${entity.state})")
+            return
+        }
+        val peerNode = NodeId.fromStringOrNull(entity.peerNodeId) ?: destinationNodeIdFallback(entity.peerNodeId)
+
+        val isReachable = transport.neighbors.value.any { it.nodeId == peerNode && it.status == com.example.multihoprelay.model.NeighborStatus.CONNECTED } ||
+                          routingManager.getRoute(peerNode) != null
+        if (!isReachable) {
+            logger.warn("TRANSFER", "acceptIncomingTransfer: Sender $peerNode is no longer reachable")
+            updateState(transferId, TransferState.FAILED, "Sender is no longer reachable")
+            logger.warn("TRANSFER", "TRANSFER_FAILED: transferId=$transferId reason=Sender is no longer reachable")
+            return
+        }
+
+        logger.info("TRANSFER", "TRANSFER_ACCEPTED: transferId=$transferId peer=$peerNode")
+
+        val staging = fileStorage.stagingFileFor(transferId)
+        try {
+            ChunkManager.preallocate(staging, entity.fileSizeBytes)
+        } catch (e: Exception) {
+            logger.error("TRANSFER", "Failed to preallocate staging file for $transferId: ${e.message}")
+            updateState(transferId, TransferState.FAILED, "Cannot allocate storage space: ${e.message}")
+            logger.error("TRANSFER", "TRANSFER_FAILED: transferId=$transferId reason=Cannot allocate storage space: ${e.message}")
+            rejectTransfer(transferId, peerNode)
+            return
+        }
+
+        transferDao.update(
+            entity.copy(
+                state = TransferState.RECEIVING,
+                localFileUri = staging.absolutePath,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        logger.info("TRANSFER", "Transfer $transferId: accepted by user, transitioning to RECEIVING")
+
+        val sent = sendPacketToward(
+            peerNode,
             Packet(
                 type = PacketType.TRANSFER_ACCEPT,
                 transferId = transferId,
                 sourceNodeId = identityProvider.nodeId(),
-                destinationNodeId = packet.sourceNodeId
+                destinationNodeId = peerNode
             )
         )
-        logger.info("TRANSFER", "Transfer $transferId: accepted, awaiting chunks")
+        if (!sent) {
+            logger.error("TRANSFER", "Failed to send TRANSFER_ACCEPT for transfer $transferId to $peerNode")
+            updateState(transferId, TransferState.FAILED, "Cannot send acceptance to sender (link unavailable)")
+            logger.error("TRANSFER", "TRANSFER_FAILED: transferId=$transferId reason=Cannot send acceptance to sender")
+        } else {
+            logger.info("TRANSFER", "TRANSFER_RESPONSE_SENT: transferId=$transferId response=ACCEPT to=$peerNode")
+        }
+    }
+
+    /**
+     * User tapped Reject on the incoming file dialog or card.
+     * Transitions state to REJECTED, cleans up any resources, and transmits TRANSFER_REJECT to sender.
+     */
+    suspend fun rejectIncomingTransfer(transferId: UUID) {
+        if (!handledTransfers.add(transferId)) {
+            logger.warn("TRANSFER", "rejectIncomingTransfer: Transfer $transferId was already handled")
+            return
+        }
+        pendingTimeoutJobs.remove(transferId)?.cancel()
+        if (_pendingIncomingRequest.value?.transferId == transferId) {
+            _pendingIncomingRequest.value = null
+        }
+        val entity = transferDao.getById(transferId.toString()) ?: run {
+            logger.warn("TRANSFER", "rejectIncomingTransfer: Unknown transfer $transferId")
+            return
+        }
+        if (entity.direction != TransferDirection.INCOMING || entity.state != TransferState.PENDING_APPROVAL) {
+            logger.warn("TRANSFER", "rejectIncomingTransfer: Transfer $transferId not in PENDING_APPROVAL (current: ${entity.state})")
+            return
+        }
+        val peerNode = NodeId.fromStringOrNull(entity.peerNodeId) ?: destinationNodeIdFallback(entity.peerNodeId)
+        fileStorage.deleteStaging(transferId)
+        transferDao.update(
+            entity.copy(
+                state = TransferState.REJECTED,
+                errorMessage = "Transfer rejected by user",
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
+        logger.info("TRANSFER", "TRANSFER_REJECTED: transferId=$transferId peer=$peerNode")
+        val sent = sendPacketToward(
+            peerNode,
+            Packet(
+                type = PacketType.TRANSFER_REJECT,
+                transferId = transferId,
+                sourceNodeId = identityProvider.nodeId(),
+                destinationNodeId = peerNode
+            )
+        )
+        if (sent) {
+            logger.info("TRANSFER", "TRANSFER_RESPONSE_SENT: transferId=$transferId response=REJECT to=$peerNode")
+        }
     }
 
     private suspend fun rejectTransfer(transferId: UUID, sender: NodeId) {
-        sendPacketToward(
+        logger.info("TRANSFER", "TRANSFER_REJECTED: transferId=$transferId peer=$sender")
+        val sent = sendPacketToward(
             sender,
             Packet(
                 type = PacketType.TRANSFER_REJECT,
@@ -348,6 +769,9 @@ class TransferManager(
                 destinationNodeId = sender
             )
         )
+        if (sent) {
+            logger.info("TRANSFER", "TRANSFER_RESPONSE_SENT: transferId=$transferId response=REJECT to=$sender")
+        }
     }
 
     private suspend fun onChunkData(packet: Packet) {
@@ -356,7 +780,7 @@ class TransferManager(
             logger.warn("TRANSFER", "CHUNK_DATA for unknown transfer $transferId dropped")
             return
         }
-        if (entity.state.isTerminal) return
+        if (entity.state != TransferState.RECEIVING) return
 
         val chunkData = try {
             ChunkDataPayload.decode(packet.payload)
@@ -428,7 +852,7 @@ class TransferManager(
     private suspend fun onChunkAck(packet: Packet) {
         val transferId = packet.transferId ?: return
         val ack = try { ChunkAckPayload.decode(packet.payload) } catch (e: Exception) { return }
-        pendingChunkAcks[transferId]?.add(ack.chunkIndex)
+        pendingChunkAcks[transferId]?.get(ack.chunkIndex)?.complete(Unit)
         val existing = transferDao.getChunk(transferId.toString(), ack.chunkIndex)
         if (existing != null) {
             transferDao.upsertChunk(existing.copy(received = true, acknowledged = true))
@@ -469,7 +893,13 @@ class TransferManager(
         if (entity.state.isTerminal) return
         updateState(transferId, TransferState.VERIFYING)
 
-        val staging = File(entity.localFileUri ?: return)
+        val staging = entity.localFileUri?.let { File(it) } ?: fileStorage.stagingFileFor(transferId)
+        if (!staging.exists()) {
+            logger.error("TRANSFER", "Transfer $transferId: staging file does not exist at ${staging.absolutePath}")
+            updateState(transferId, TransferState.FAILED, "Staging file missing")
+            return
+        }
+
         val actualHash = ChunkManager.fullFileSha256(staging)
         val expectedHash = entity.fileSha256
 
@@ -477,24 +907,56 @@ class TransferManager(
             logger.error("TRANSFER", "Transfer $transferId: FINAL HASH MISMATCH - file rejected")
             updateState(transferId, TransferState.FAILED, "File integrity verification failed")
             fileStorage.deleteStaging(transferId)
+            sendPacketToward(
+                NodeId(entity.peerNodeId),
+                Packet(
+                    type = PacketType.TRANSFER_REJECT,
+                    transferId = transferId,
+                    sourceNodeId = identityProvider.nodeId(),
+                    destinationNodeId = NodeId(entity.peerNodeId)
+                )
+            )
             return
         }
 
         val finalFile = fileStorage.finalFileFor(transferId, entity.fileName)
         fileStorage.moveToFinal(staging, finalFile)
 
+        if (!finalFile.exists()) {
+            logger.error("TRANSFER", "Transfer $transferId: destination file does not exist after moveToFinal")
+            updateState(transferId, TransferState.FAILED, "Failed to save final file")
+            return
+        }
+
         transferDao.update(
             entity.copy(
                 state = TransferState.COMPLETED,
+                chunksDone = entity.totalChunks,
                 outputFilePath = finalFile.absolutePath,
                 updatedAtMillis = System.currentTimeMillis()
             )
         )
-        logger.info("TRANSFER", "Transfer $transferId: COMPLETED, file verified and saved (not auto-opened)")
+        logger.info("TRANSFER", "Transfer $transferId: COMPLETED, file verified and saved to ${finalFile.absolutePath}")
+
+        sendPacketToward(
+            NodeId(entity.peerNodeId),
+            Packet(
+                type = PacketType.TRANSFER_CONFIRM,
+                transferId = transferId,
+                sourceNodeId = identityProvider.nodeId(),
+                destinationNodeId = NodeId(entity.peerNodeId)
+            )
+        )
     }
 
     private suspend fun onTransferCancel(packet: Packet) {
         val transferId = packet.transferId ?: return
+        val current = transferDao.getById(transferId.toString())
+        if (current?.state?.isTerminal == true) {
+            logger.debug("TRANSFER", "Transfer $transferId already in terminal state ${current.state}, ignoring TRANSFER_CANCEL")
+            return
+        }
+        fileStorage.deleteStaging(transferId)
         updateState(transferId, TransferState.CANCELLED, "Cancelled by peer")
     }
 
@@ -526,13 +988,13 @@ class TransferManager(
 
     /** Sends a packet to [destination], resolving the next hop via direct-neighbor check or the route table. */
     private suspend fun sendPacketToward(destination: NodeId, packet: Packet): Boolean {
-        val direct = transport.neighbors.value.any { it.nodeId == destination }
-        val nextHop = if (direct) destination else routingManager.getRoute(destination)?.nextHop
-        if (nextHop == null) {
-            logger.warn("TRANSFER", "No known route to $destination for packet ${packet.type}")
-            return false
+        val direct = transport.neighbors.value.any { it.nodeId == destination && it.isConnected }
+        val nextHop = if (direct) destination else (routingManager.getRoute(destination)?.nextHop ?: destination)
+        val sent = transport.sendToNeighbor(nextHop, packet)
+        if (!sent) {
+            logger.warn("TRANSFER", "Failed to send packet ${packet.type} to nextHop $nextHop for destination $destination")
         }
-        return transport.sendToNeighbor(nextHop, packet)
+        return sent
     }
 
     private fun chunkAad(transferId: UUID, chunkIndex: Int): ByteArray {
@@ -589,6 +1051,141 @@ class TransferManager(
         )
         if (state.isFailure) {
             logger.warn("TRANSFER", "Transfer $transferId -> $state${errorMessage?.let { ": $it" } ?: ""}")
+        }
+    }
+
+    private suspend fun handleNearbyPayloadUpdate(
+        transferId: UUID,
+        update: com.google.android.gms.nearby.connection.PayloadTransferUpdate,
+        payload: com.google.android.gms.nearby.connection.Payload?
+    ) {
+        val entity = transferDao.getById(transferId.toString()) ?: return
+        when (update.status) {
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.IN_PROGRESS -> {
+                if (update.totalBytes > 0 && entity.totalChunks > 0) {
+                    val done = ((update.bytesTransferred.toDouble() / update.totalBytes) * entity.totalChunks).toInt().coerceIn(0, entity.totalChunks)
+                    if (done != entity.chunksDone) {
+                        transferDao.update(entity.copy(chunksDone = done, updatedAtMillis = System.currentTimeMillis()))
+                    }
+                }
+            }
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.SUCCESS -> {
+                logger.info("TRANSFER", "Nearby payload transfer SUCCESS for transfer $transferId")
+                if (entity.direction == TransferDirection.INCOMING) {
+                    if (entity.state == TransferState.COMPLETED || entity.state == TransferState.VERIFYING) {
+                        logger.debug("TRANSFER", "Transfer $transferId already in ${entity.state}, ignoring duplicate SUCCESS update")
+                        return
+                    }
+
+                    if (payload != null) {
+                        val staging = fileStorage.stagingFileFor(transferId)
+                        staging.parentFile?.mkdirs()
+
+                        val inputStream: java.io.InputStream? = try {
+                            (transport as? com.example.multihoprelay.nearby.NearbyConnectionManager)?.openPayloadInputStream(payload)
+                                ?: payload.asFile()?.asUri()?.let { uri ->
+                                    context?.contentResolver?.openInputStream(uri)
+                                }
+                                ?: payload.asFile()?.asParcelFileDescriptor()?.let { pfd ->
+                                    java.io.FileInputStream(pfd.fileDescriptor)
+                                }
+                                ?: payload.asFile()?.let { pFile ->
+                                    try {
+                                        @Suppress("DEPRECATION")
+                                        pFile.asJavaFile()?.takeIf { it.exists() && it.canRead() }?.let { java.io.FileInputStream(it) }
+                                    } catch (_: Exception) { null }
+                                }
+                        } catch (e: Exception) {
+                            logger.error("TRANSFER", "Failed to obtain stream for received payload $transferId: ${e.message}")
+                            null
+                        }
+
+                        if (inputStream == null) {
+                            logger.error("TRANSFER", "Could not open input stream from received payload for transfer $transferId")
+                            updateState(transferId, TransferState.FAILED, "Cannot open received file stream from Nearby Connections")
+                            return
+                        }
+
+                        try {
+                            inputStream.use { input ->
+                                java.io.FileOutputStream(staging).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            logger.error("TRANSFER", "Failed to copy received file payload for $transferId: ${e.message}")
+                            updateState(transferId, TransferState.FAILED, "Failed to copy received file: ${e.message}")
+                            return
+                        }
+
+                        if (!staging.exists() || (entity.fileSizeBytes > 0L && staging.length() == 0L)) {
+                            logger.error("TRANSFER", "Copied staging file for $transferId is empty or missing")
+                            updateState(transferId, TransferState.FAILED, "Received file is empty or corrupted")
+                            return
+                        }
+
+                        logger.info("TRANSFER", "Staging file written successfully for transfer $transferId: size=${staging.length()} bytes")
+                        (transport as? com.example.multihoprelay.nearby.NearbyConnectionManager)?.incomingFilePayloads?.remove(update.payloadId)
+                        (transport as? com.example.multihoprelay.nearby.NearbyConnectionManager)?.payloadToTransfer?.remove(update.payloadId)
+                        finalizeReceivedTransfer(transferId)
+                    }
+                } else {
+                    transferDao.update(entity.copy(chunksDone = entity.totalChunks, updatedAtMillis = System.currentTimeMillis()))
+                }
+            }
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.FAILURE -> {
+                logger.error("TRANSFER", "Nearby payload transfer FAILED for transfer $transferId")
+                fileStorage.deleteStaging(transferId)
+                updateState(transferId, TransferState.FAILED, "Transfer failed over Nearby Connections")
+            }
+            com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status.CANCELED -> {
+                logger.info("TRANSFER", "Nearby payload transfer CANCELED for transfer $transferId")
+                fileStorage.deleteStaging(transferId)
+                updateState(transferId, TransferState.CANCELLED, "Transfer cancelled")
+            }
+        }
+    }
+
+    /** Called when a neighbor disconnects; invalidates pending transfers associated with that node. */
+    fun onNeighborLost(neighbor: NodeId) {
+        scope.launch {
+            val all = transferDao.getAll()
+            all.forEach { entity ->
+                if (entity.peerNodeId == neighbor.value) {
+                    val tid = try { UUID.fromString(entity.transferId) } catch (_: Exception) { null }
+                    if (entity.state == TransferState.PENDING_APPROVAL) {
+                        logger.warn("TRANSFER", "Transfer ${entity.transferId} invalidated: sender $neighbor disconnected")
+                        if (tid != null) {
+                            handledTransfers.add(tid)
+                            pendingTimeoutJobs.remove(tid)?.cancel()
+                            if (_pendingIncomingRequest.value?.transferId == tid) {
+                                _pendingIncomingRequest.value = null
+                            }
+                            logger.warn("TRANSFER", "TRANSFER_FAILED: transferId=$tid reason=Sender disconnected")
+                        }
+                        transferDao.update(
+                            entity.copy(
+                                state = TransferState.FAILED,
+                                errorMessage = "Sender disconnected",
+                                updatedAtMillis = System.currentTimeMillis()
+                            )
+                        )
+                    } else if (entity.state == TransferState.WAITING_FOR_APPROVAL) {
+                        logger.warn("TRANSFER", "Transfer ${entity.transferId} failed: receiver $neighbor disconnected")
+                        if (tid != null) {
+                            pendingAccept.remove(tid)?.complete(false)
+                            logger.warn("TRANSFER", "TRANSFER_FAILED: transferId=$tid reason=Receiver disconnected")
+                        }
+                        transferDao.update(
+                            entity.copy(
+                                state = TransferState.FAILED,
+                                errorMessage = "Receiver disconnected",
+                                updatedAtMillis = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 }

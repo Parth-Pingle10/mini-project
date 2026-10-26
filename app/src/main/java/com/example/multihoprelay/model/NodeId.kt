@@ -29,6 +29,14 @@ value class NodeId(val value: String) {
 
         fun fromString(s: String): NodeId = NodeId(s.uppercase())
 
+        fun fromStringOrNull(s: String?): NodeId? {
+            if (s == null) return null
+            val upper = s.trim().uppercase()
+            if (upper.length != LENGTH) return null
+            if (!upper.all { it.isDigit() || it in 'A'..'F' }) return null
+            return NodeId(upper)
+        }
+
         /** A reserved broadcast destination used for route-discovery packets. */
         val BROADCAST = NodeId("FFFFFFFF")
     }

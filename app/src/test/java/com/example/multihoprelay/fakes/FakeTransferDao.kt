@@ -34,6 +34,8 @@ class FakeTransferDao : TransferDao {
 
     override suspend fun getById(transferId: String): TransferEntity? = transfers[transferId]
 
+    override suspend fun getAll(): List<TransferEntity> = transfers.values.sortedByDescending { it.updatedAtMillis }
+
     override fun observeAll(): Flow<List<TransferEntity>> = _all
 
     override fun observeById(transferId: String): Flow<TransferEntity?> =

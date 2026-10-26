@@ -11,6 +11,7 @@ enum class PacketType(val code: Int) {
     ROUTE_REQUEST(2),          // RREQ - flooded to discover a route to a destination
     ROUTE_REPLY(3),            // RREP - unicast back along the reverse path
     ROUTE_ERROR(4),            // RERR - notifies upstream nodes a route broke
+    ROUTE_ADVERTISEMENT(5),    // route advertisement: propagates reachable nodes through intermediate nodes
 
     // Transfer control (end-to-end, relay only sees these as opaque-ish control frames
     // except for the routing header fields which are always in the clear)
@@ -21,7 +22,9 @@ enum class PacketType(val code: Int) {
     CHUNK_ACK(14),             // receiver -> sender: chunk received + verified
     TRANSFER_COMPLETE(15),     // sender -> receiver: all chunks sent
     TRANSFER_CANCEL(16),       // either direction: abort transfer
-    CHUNK_RESEND_REQUEST(17);  // receiver -> sender: request retransmission of missing chunks
+    CHUNK_RESEND_REQUEST(17),  // receiver -> sender: request retransmission of missing chunks
+    TRANSFER_CONFIRM(18),      // receiver -> sender: file validated and saved successfully
+    TRANSFER_FILE_PAYLOAD(19); // sender -> receiver: native Nearby file payload announcement
 
     companion object {
         fun fromCode(code: Int): PacketType =
@@ -37,22 +40,25 @@ enum class TransferState {
     DISCOVERING,
     ROUTE_FOUND,
     PREPARING,
+    WAITING_FOR_APPROVAL,
     ENCRYPTING,
     TRANSFERRING,
     RELAYING,
+    PENDING_APPROVAL,
     RECEIVING,
     VERIFYING,
     COMPLETED,
+    REJECTED,
     FAILED,
     CANCELLED,
     EXPIRED,
     NO_ROUTE;
 
     val isTerminal: Boolean
-        get() = this == COMPLETED || this == FAILED || this == CANCELLED || this == EXPIRED
+        get() = this == COMPLETED || this == REJECTED || this == FAILED || this == CANCELLED || this == EXPIRED
 
     val isFailure: Boolean
-        get() = this == FAILED || this == CANCELLED || this == EXPIRED || this == NO_ROUTE
+        get() = this == REJECTED || this == FAILED || this == CANCELLED || this == EXPIRED || this == NO_ROUTE
 }
 
 enum class RelayPacketState { QUEUED, FORWARDING, FORWARDED, EXPIRED, FAILED }

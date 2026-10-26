@@ -25,9 +25,14 @@ class RoutingManagerTest {
         val identity = SimulatedIdentityProvider(name)
         val transport = network.addNode(identity.nodeId())
         val logger = MeshLogger()
-        val routing = RoutingManager(transport, identity, scope, logger, routeTtlMillis = 60_000L)
-        fun start() = routing.start()
-        fun stop() = routing.stop()
+        val supervisor = kotlinx.coroutines.SupervisorJob()
+        val nodeScope = kotlinx.coroutines.CoroutineScope(scope.coroutineContext + supervisor)
+        val routing = RoutingManager(transport, identity, nodeScope, logger, routeTtlMillis = 60_000L)
+        fun start() = routing.start(false)
+        fun stop() {
+            routing.stop()
+            supervisor.cancel()
+        }
     }
 
     @Test
@@ -50,6 +55,7 @@ class RoutingManagerTest {
         assertEquals(b.identity.nodeId(), route!!.nextHop)
         assertEquals(listOf(a.identity.nodeId(), b.identity.nodeId(), c.identity.nodeId()), route.fullPath)
         nodes.forEach { it.stop() }
+        advanceUntilIdle()
     }
 
     @Test
