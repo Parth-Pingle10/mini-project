@@ -17,8 +17,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.model.TransferDirection
 import com.example.multihoprelay.model.TransferInfo
@@ -30,7 +32,7 @@ fun TransfersScreen(viewModel: AppViewModel) {
     val transfers by viewModel.transfers.collectAsState()
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Transfers", style = MaterialTheme.typography.titleLarge)
+        Text("Transfers", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         if (transfers.isEmpty()) {
             Text(
                 "No transfers yet. Start one from the Send screen.",
@@ -39,6 +41,7 @@ fun TransfersScreen(viewModel: AppViewModel) {
             )
         } else {
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -64,12 +67,30 @@ private fun TransferCard(
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(info.fileName, fontWeight = FontWeight.Bold)
-                Text(if (info.direction == TransferDirection.OUTGOING) "Sending" else "Receiving")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    info.fileName,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    if (info.direction == TransferDirection.OUTGOING) "Sending" else "Receiving",
+                    maxLines = 1,
+                    softWrap = false,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
             Text(
-                if (info.direction == TransferDirection.OUTGOING) "To: ${info.peerNodeId.value}" else "From: ${info.peerNodeId.value}"
+                if (info.direction == TransferDirection.OUTGOING) "To: ${info.peerNodeId.value}" else "From: ${info.peerNodeId.value}",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Text(
                 "Size: ${com.example.multihoprelay.util.FormatUtils.formatFileSize(info.fileSizeBytes)}",
@@ -97,16 +118,25 @@ private fun TransferCard(
                         onClick = onAccept,
                         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                             containerColor = androidx.compose.ui.graphics.Color(0xFF2E7D32)
-                        )
+                        ),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
                     ) {
-                        Text("Allow")
+                        Text("Allow", maxLines = 1, softWrap = false)
                     }
-                    OutlinedButton(onClick = onReject) {
-                        Text("Reject")
+                    OutlinedButton(
+                        onClick = onReject,
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text("Reject", maxLines = 1, softWrap = false)
                     }
                 }
             } else if (!info.state.isTerminal) {
-                OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                OutlinedButton(
+                    onClick = onCancel,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Text("Cancel", maxLines = 1, softWrap = false)
+                }
             }
 
             if (info.state == TransferState.COMPLETED && !info.outputFilePath.isNullOrBlank()) {
@@ -121,13 +151,13 @@ private fun TransferCard(
                             onClick = { openFile(context, file) },
                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                         ) {
-                            Text("Open File")
+                            Text("Open File", maxLines = 1, softWrap = false)
                         }
                         OutlinedButton(
                             onClick = { shareFile(context, file) },
                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                         ) {
-                            Text("Share")
+                            Text("Share", maxLines = 1, softWrap = false)
                         }
                     }
                 }

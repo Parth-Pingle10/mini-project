@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.bluetooth.BlePermissions
 import com.example.multihoprelay.model.Neighbor
@@ -87,12 +88,16 @@ fun NearbyDevicesScreen(
     }
 
     androidx.compose.runtime.LaunchedEffect(bluetoothEnabled, hasPermissions) {
-        if (bluetoothEnabled && hasPermissions && !isScanning) {
+        if (bluetoothEnabled && hasPermissions) {
             viewModel.refreshAll()
         }
     }
 
     val multihopNodes = reachableNodes.filter { !it.isDirect }
+    val directNeighbors = neighbors.filter { neighbor ->
+        neighbor.status != NeighborStatus.DISCONNECTED &&
+        (neighbor.isConnected || multihopNodes.none { it.nodeId == neighbor.nodeId })
+    }
 
     Box(
         modifier = Modifier
@@ -122,7 +127,9 @@ fun NearbyDevicesScreen(
                         Text(
                             "Node ID: ${viewModel.nodeId.value} (${Build.MODEL})",
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -147,7 +154,7 @@ fun NearbyDevicesScreen(
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.error
                             )
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     "Bluetooth is disabled",
                                     fontWeight = FontWeight.Bold,
@@ -180,7 +187,7 @@ fun NearbyDevicesScreen(
                                 onClick = onRequestPermissions,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Grant Permissions")
+                                Text("Grant Permissions", maxLines = 1, softWrap = false)
                             }
                         }
                     }
@@ -194,7 +201,7 @@ fun NearbyDevicesScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                         Text(
                             "Discovered & Reachable Nodes",
                             style = MaterialTheme.typography.titleLarge,
@@ -202,7 +209,7 @@ fun NearbyDevicesScreen(
                         )
                         Text(
                             if (isRefreshing) "Refreshing discovery & routes..."
-                            else "${neighbors.size} direct · ${multihopNodes.size} multihop",
+                            else "${directNeighbors.size} direct · ${multihopNodes.size} multihop",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -211,15 +218,15 @@ fun NearbyDevicesScreen(
                     OutlinedButton(
                         onClick = { viewModel.refreshAll() },
                         enabled = bluetoothEnabled && hasPermissions && !isRefreshing,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         if (isRefreshing) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
                                 strokeWidth = 2.dp
                             )
-                            Spacer(Modifier.width(8.dp))
-                            Text("Refreshing...")
+                            Spacer(Modifier.width(6.dp))
+                            Text("Refreshing...", maxLines = 1, softWrap = false)
                         } else {
                             Icon(
                                 Icons.Filled.Refresh,
@@ -227,7 +234,7 @@ fun NearbyDevicesScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text("Refresh")
+                            Text("Refresh", maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -252,7 +259,7 @@ fun NearbyDevicesScreen(
                 }
             }
 
-            if (neighbors.isEmpty()) {
+            if (directNeighbors.isEmpty()) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -282,7 +289,7 @@ fun NearbyDevicesScreen(
                     }
                 }
             } else {
-                items(neighbors, key = { "direct_${it.nodeId.value}" }) { neighbor ->
+                items(directNeighbors, key = { "direct_${it.nodeId.value}" }) { neighbor ->
                     DirectNeighborCard(
                         neighbor = neighbor,
                         onConnect = { viewModel.connectToNeighbor(neighbor.nodeId) },
@@ -385,11 +392,16 @@ private fun DirectNeighborCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
                         text = "Node ${neighbor.nodeId.value}",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     StatusBadge(
                         status = neighbor.status,
@@ -410,7 +422,8 @@ private fun DirectNeighborCard(
                     Text(
                         text = if (neighbor.rssi != 0) "${neighbor.rssi} dBm" else "Active",
                         style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1
                     )
                 }
             }
@@ -424,35 +437,35 @@ private fun DirectNeighborCard(
                 if (neighbor.status == NeighborStatus.CONNECTED) {
                     Button(
                         onClick = onSendFile,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Send File")
+                        Text("Send File", maxLines = 1, softWrap = false)
                     }
                     Spacer(Modifier.width(8.dp))
                     OutlinedButton(
                         onClick = onDisconnect,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Text("Disconnect", color = MaterialTheme.colorScheme.error)
+                        Text("Disconnect", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
                     }
                 } else if (neighbor.status == NeighborStatus.CONNECTING) {
                     Button(
                         onClick = {},
                         enabled = false,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(6.dp))
-                        Text("Connecting...")
+                        Text("Connecting...", maxLines = 1, softWrap = false)
                     }
                 } else {
                     Button(
                         onClick = onConnect,
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                     ) {
-                        Text("Connect")
+                        Text("Connect", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -483,11 +496,16 @@ private fun ReachableNodeCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
                         text = node.displayName,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     ReachableBadge(node = node)
                 }
@@ -495,11 +513,11 @@ private fun ReachableNodeCard(
                 if (node.isAvailable) {
                     Button(
                         onClick = onSendFile,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Icon(Icons.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Send File")
+                        Text("Send File", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -542,7 +560,9 @@ private fun ReachableBadge(node: ReachableNode) {
                 text = node.statusText,
                 style = MaterialTheme.typography.labelSmall,
                 color = textColor,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
             )
         }
     }
@@ -596,7 +616,9 @@ private fun StatusBadge(status: NeighborStatus, customLabel: String? = null) {
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = textColor,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
             )
         }
     }

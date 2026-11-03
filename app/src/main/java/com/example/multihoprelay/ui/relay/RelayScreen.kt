@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -26,8 +28,14 @@ fun RelayScreen(viewModel: AppViewModel) {
     val stats by viewModel.relayStats.collectAsState()
     val settings by viewModel.relaySettings.collectAsState()
 
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Relay", style = MaterialTheme.typography.titleLarge)
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Relay", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
 
         Card(Modifier.fillMaxWidth()) {
             Row(
@@ -35,7 +43,7 @@ fun RelayScreen(viewModel: AppViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(Modifier.weight(1f)) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text("Intermediate Relay Mode", fontWeight = FontWeight.Bold)
                     Text(
                         "When enabled, this phone acts as an intermediate node forwarding mesh packets between other nodes without seeing data. When disabled, this node only acts as a terminal source/destination.",
@@ -68,7 +76,7 @@ fun RelayScreen(viewModel: AppViewModel) {
         }
 
         OutlinedButton(onClick = { viewModel.clearRelayCache() }, modifier = Modifier.fillMaxWidth()) {
-            Text("Clear Relay Cache")
+            Text("Clear Relay Cache", maxLines = 1, softWrap = false)
         }
 
         Text(

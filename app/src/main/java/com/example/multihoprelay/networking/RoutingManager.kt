@@ -397,7 +397,7 @@ class RoutingManager(
         val seq = advSequenceNumber.incrementAndGet()
         val now = System.currentTimeMillis()
         val selfKey = identityProvider.publicKeyEncoded()
-        val selfName = android.os.Build.MODEL.take(20)
+        val selfName = try { android.os.Build.MODEL?.take(20) ?: "Node" } catch (_: Throwable) { "Node" }
 
         connectedNeighbors.forEach { neighbor ->
             val entries = mutableListOf<RouteAdvertisementEntry>()

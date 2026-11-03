@@ -79,6 +79,7 @@ class TransferManager(
     val pendingIncomingRequest: StateFlow<PendingIncomingTransfer?> = _pendingIncomingRequest.asStateFlow()
     private val pendingTimeoutJobs = ConcurrentHashMap<UUID, Job>()
     private val handledTransfers = ConcurrentHashMap.newKeySet<UUID>()
+    private val receiverFileKeys = ConcurrentHashMap<UUID, SecretKey>()
 
     private var incomingJob: Job? = null
 
@@ -106,6 +107,7 @@ class TransferManager(
         pendingTimeoutJobs.clear()
         _pendingIncomingRequest.value = null
         handledTransfers.clear()
+        receiverFileKeys.clear()
         incomingJob?.cancel()
         incomingJob = null
         if (transport is com.example.multihoprelay.nearby.NearbyConnectionManager) {
@@ -205,6 +207,12 @@ class TransferManager(
         if (recipientKeyBytes == null) {
             logger.warn("TRANSFER", "Transfer $transferId: recipient public key unknown for $destination")
             updateState(transferId, TransferState.FAILED, "Recipient public key unknown for $destination")
+            return
+        }
+        val derivedDestNodeId = NodeId.fromPublicKeyBytes(recipientKeyBytes)
+        if (derivedDestNodeId != destination) {
+            logger.error("TRANSFER", "Transfer $transferId: recipient public key does not match destination $destination (derived: $derivedDestNodeId)")
+            updateState(transferId, TransferState.FAILED, "Recipient public key does not match destination")
             return
         }
         val recipientPublicKey = try {
@@ -548,6 +556,7 @@ class TransferManager(
 
         logger.info("TRANSFER", "Transfer $transferId: TRANSFER_INIT from ${packet.sourceNodeId} verified (signature OK)")
         logger.info("TRANSFER", "TRANSFER_INIT_VALIDATED: transferId=$transferId valid=true")
+        routingManager.registerPublicKey(packet.sourceNodeId, init.senderPublicKey)
 
         val entity = TransferEntity(
             transferId = transferId.toString(),
@@ -797,10 +806,10 @@ class TransferManager(
         }
 
         val fileKey = try {
-            unwrapReceiverFileKey(entity)
+            unwrapReceiverFileKey(transferId, entity)
         } catch (e: Exception) {
             logger.error("TRANSFER", "Transfer $transferId: failed to unwrap file key: ${e.message}")
-            updateState(transferId, TransferState.FAILED, "Key unwrap failure")
+            updateState(transferId, TransferState.FAILED, "Key unwrap failure: ${e.message ?: "Decryption error"}")
             return
         }
 
@@ -894,6 +903,7 @@ class TransferManager(
         updateState(transferId, TransferState.VERIFYING)
 
         val staging = entity.localFileUri?.let { File(it) } ?: fileStorage.stagingFileFor(transferId)
+        receiverFileKeys.remove(transferId)
         if (!staging.exists()) {
             logger.error("TRANSFER", "Transfer $transferId: staging file does not exist at ${staging.absolutePath}")
             updateState(transferId, TransferState.FAILED, "Staging file missing")
@@ -957,6 +967,7 @@ class TransferManager(
             return
         }
         fileStorage.deleteStaging(transferId)
+        receiverFileKeys.remove(transferId)
         updateState(transferId, TransferState.CANCELLED, "Cancelled by peer")
     }
 
@@ -1005,9 +1016,12 @@ class TransferManager(
         return buffer.array()
     }
 
-    private suspend fun unwrapReceiverFileKey(entity: TransferEntity): SecretKey {
+    private suspend fun unwrapReceiverFileKey(transferId: UUID, entity: TransferEntity): SecretKey {
+        receiverFileKeys[transferId]?.let { return it }
         val wrapped = entity.wrappedFileKeyForReceiver ?: throw IllegalStateException("No wrapped key stored")
-        return encryptionManager.unwrapFileKey(wrapped, identityProvider.privateKey())
+        val unwrapped = encryptionManager.unwrapFileKey(wrapped, identityProvider.privateKey())
+        receiverFileKeys[transferId] = unwrapped
+        return unwrapped
     }
 
     private suspend fun persistNewOutgoing(

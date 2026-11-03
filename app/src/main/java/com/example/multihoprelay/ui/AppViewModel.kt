@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.multihoprelay.AppContainer
 import com.example.multihoprelay.data.database.entity.TransferEntity
 import com.example.multihoprelay.data.settings.RelaySettings
+import com.example.multihoprelay.model.NeighborStatus
 import com.example.multihoprelay.model.NodeId
 import com.example.multihoprelay.model.PendingIncomingTransfer
 import com.example.multihoprelay.model.Route
@@ -81,51 +82,75 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         ) { neighborsList, routesMap ->
             val result = mutableListOf<ReachableNode>()
             val processedNodeIds = mutableSetOf<NodeId>()
+            val now = System.currentTimeMillis()
 
-            // 1. Direct neighbors from Nearby Connections
-            neighborsList.filter { it.nodeId != nodeId }.forEach { neighbor ->
+            // 1. Directly CONNECTED neighbors from Nearby Connections
+            neighborsList.filter { it.nodeId != nodeId && it.isConnected }.forEach { neighbor ->
                 val devName = container.connectionManager.getDeviceName(neighbor.nodeId)
                     ?: container.routingManager.getKnownDeviceName(neighbor.nodeId)
                     ?: ""
-                val isConnected = neighbor.isConnected
                 result.add(
                     ReachableNode(
                         nodeId = neighbor.nodeId,
                         deviceName = devName,
                         isDirect = true,
-                        isConnected = isConnected,
+                        isConnected = true,
                         nextHop = neighbor.nodeId,
                         hopCount = 1,
                         fullPath = listOf(nodeId, neighbor.nodeId),
-                        isAvailable = isConnected
+                        isAvailable = true
                     )
                 )
                 processedNodeIds.add(neighbor.nodeId)
             }
 
             // 2. Multi-hop reachable nodes from route advertisements
-            val now = System.currentTimeMillis()
             routesMap.forEach { (destNode, route) ->
                 if (destNode != nodeId && !processedNodeIds.contains(destNode)) {
-                    val devName = container.routingManager.getKnownDeviceName(destNode) ?: ""
+                    val devName = container.routingManager.getKnownDeviceName(destNode)
+                        ?: container.connectionManager.getDeviceName(destNode)
+                        ?: ""
                     val isExpired = route.isExpired(now, Route.DEFAULT_ROUTE_TTL_MILLIS)
                     val isNextHopConnected = neighborsList.any { it.nodeId == route.nextHop && it.isConnected }
                     val isAvailable = !isExpired && isNextHopConnected
-                    result.add(
-                        ReachableNode(
-                            nodeId = destNode,
-                            deviceName = devName,
-                            isDirect = false,
-                            isConnected = isAvailable,
-                            nextHop = route.nextHop,
-                            hopCount = route.hopCount,
-                            fullPath = route.fullPath,
-                            isAvailable = isAvailable
+                    if (isAvailable || route.hopCount > 1) {
+                        result.add(
+                            ReachableNode(
+                                nodeId = destNode,
+                                deviceName = devName,
+                                isDirect = false,
+                                isConnected = isAvailable,
+                                nextHop = route.nextHop,
+                                hopCount = route.hopCount,
+                                fullPath = route.fullPath,
+                                isAvailable = isAvailable
+                            )
                         )
-                    )
-                    processedNodeIds.add(destNode)
+                        processedNodeIds.add(destNode)
+                    }
                 }
             }
+
+            // 3. Discovered but not yet connected neighbors that have no active multi-hop route
+            neighborsList.filter { it.nodeId != nodeId && it.status != NeighborStatus.DISCONNECTED && !processedNodeIds.contains(it.nodeId) }.forEach { neighbor ->
+                val devName = container.connectionManager.getDeviceName(neighbor.nodeId)
+                    ?: container.routingManager.getKnownDeviceName(neighbor.nodeId)
+                    ?: ""
+                result.add(
+                    ReachableNode(
+                        nodeId = neighbor.nodeId,
+                        deviceName = devName,
+                        isDirect = true,
+                        isConnected = false,
+                        nextHop = neighbor.nodeId,
+                        hopCount = 1,
+                        fullPath = listOf(nodeId, neighbor.nodeId),
+                        isAvailable = false
+                    )
+                )
+                processedNodeIds.add(neighbor.nodeId)
+            }
+
             result
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     }

@@ -16,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.model.LogLevel
 import com.example.multihoprelay.ui.AppViewModel
@@ -26,12 +27,17 @@ fun LogsScreen(viewModel: AppViewModel) {
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Debug Logs", style = MaterialTheme.typography.titleLarge)
+            Text("Debug Logs", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { viewModel.clearLogs() }) { Text("Clear") }
+            OutlinedButton(onClick = { viewModel.clearLogs() }) {
+                Text("Clear", maxLines = 1, softWrap = false)
+            }
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             items(logs.asReversed()) { entry ->
                 Text(
                     entry.formatted(),

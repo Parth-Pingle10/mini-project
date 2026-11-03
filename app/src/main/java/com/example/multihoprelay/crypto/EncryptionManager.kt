@@ -43,6 +43,24 @@ class EncryptionManager {
 
     /** Wraps [fileKey] so only the holder of [recipientPublicKey]'s matching private key can read it. */
     fun wrapFileKey(fileKey: SecretKey, recipientPublicKey: PublicKey): ByteArray {
+        // Strategy 1: Standard Android KeyStore OAEP with SHA-256 and MGF1-SHA1
+        try {
+            val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+            val oaepSpec = OAEPParameterSpec(
+                "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT
+            )
+            cipher.init(Cipher.ENCRYPT_MODE, recipientPublicKey, oaepSpec)
+            return cipher.doFinal(fileKey.encoded)
+        } catch (_: Exception) {}
+
+        // Strategy 2: Default cipher initialization without explicit parameter spec
+        try {
+            val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+            cipher.init(Cipher.ENCRYPT_MODE, recipientPublicKey)
+            return cipher.doFinal(fileKey.encoded)
+        } catch (_: Exception) {}
+
+        // Strategy 3: MGF1-SHA256 fallback (e.g. JVM tests or platforms that support SHA256 MGF1)
         val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
         val oaepSpec = OAEPParameterSpec(
             "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT
@@ -53,13 +71,63 @@ class EncryptionManager {
 
     /** Unwraps a file key using this device's Keystore-backed private identity key. */
     fun unwrapFileKey(wrapped: ByteArray, privateKey: PrivateKey): SecretKey {
-        val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
-        val oaepSpec = OAEPParameterSpec(
-            "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT
-        )
-        cipher.init(Cipher.DECRYPT_MODE, privateKey, oaepSpec)
-        val rawKey = cipher.doFinal(wrapped)
-        return SecretKeySpec(rawKey, "AES")
+        var lastException: Exception? = null
+
+        // Strategy 1: Explicit MGF1-SHA1 (standard Android KeyStore hardware requirement)
+        try {
+            val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+            val oaepSpec = OAEPParameterSpec(
+                "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT
+            )
+            cipher.init(Cipher.DECRYPT_MODE, privateKey, oaepSpec)
+            val rawKey = cipher.doFinal(wrapped)
+            if (rawKey != null && rawKey.size == 32) {
+                return SecretKeySpec(rawKey, "AES")
+            }
+        } catch (e: Exception) {
+            lastException = e
+        }
+
+        // Strategy 2: Default initialization without explicit OAEPParameterSpec
+        try {
+            val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+            cipher.init(Cipher.DECRYPT_MODE, privateKey)
+            val rawKey = cipher.doFinal(wrapped)
+            if (rawKey != null && rawKey.size == 32) {
+                return SecretKeySpec(rawKey, "AES")
+            }
+        } catch (e: Exception) {
+            lastException = e
+        }
+
+        // Strategy 3: Explicit MGF1-SHA256 fallback (if sender wrapped with MGF1-SHA256)
+        try {
+            val cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")
+            val oaepSpec = OAEPParameterSpec(
+                "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT
+            )
+            cipher.init(Cipher.DECRYPT_MODE, privateKey, oaepSpec)
+            val rawKey = cipher.doFinal(wrapped)
+            if (rawKey != null && rawKey.size == 32) {
+                return SecretKeySpec(rawKey, "AES")
+            }
+        } catch (e: Exception) {
+            lastException = e
+        }
+
+        // Strategy 4: Generic OAEPPadding fallback
+        try {
+            val cipher = Cipher.getInstance("RSA/ECB/OAEPPadding")
+            cipher.init(Cipher.DECRYPT_MODE, privateKey)
+            val rawKey = cipher.doFinal(wrapped)
+            if (rawKey != null && rawKey.size == 32) {
+                return SecretKeySpec(rawKey, "AES")
+            }
+        } catch (e: Exception) {
+            lastException = e
+        }
+
+        throw lastException ?: java.security.GeneralSecurityException("Failed to unwrap AES file key")
     }
 
     /**

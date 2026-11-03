@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.Screen
 import com.example.multihoprelay.bluetooth.BlePermissions
@@ -69,7 +70,9 @@ fun HomeScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit, onRequestP
                         viewModel.nodeId.value,
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         if (relaySettings.relayModeEnabled) "Role: Intermediate Node (Forwarding + Terminal)"
@@ -113,7 +116,7 @@ fun HomeScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit, onRequestP
                     )
                     if (!hasPermissions) {
                         Button(onClick = onRequestPermissions, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                            Text("Grant Bluetooth Permissions")
+                            Text("Grant Bluetooth Permissions", maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -143,7 +146,14 @@ fun HomeScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit, onRequestP
                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -157,14 +167,19 @@ private fun StatusRow(icon: androidx.compose.ui.graphics.vector.ImageVector, lab
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.weight(1f).padding(end = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
             Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
-            Text(label)
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Text(
             value,
             color = if (good) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
         )
     }
 }

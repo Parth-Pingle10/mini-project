@@ -1,7 +1,12 @@
 package com.example.multihoprelay.nearby
 
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.example.multihoprelay.model.Neighbor
 import com.example.multihoprelay.model.NeighborStatus
 import com.example.multihoprelay.model.NodeId
@@ -17,6 +22,7 @@ import com.google.android.gms.nearby.connection.ConnectionInfo
 import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
 import com.google.android.gms.nearby.connection.ConnectionResolution
 import com.google.android.gms.nearby.connection.ConnectionsClient
+import com.google.android.gms.nearby.connection.ConnectionsStatusCodes
 import com.google.android.gms.nearby.connection.DiscoveredEndpointInfo
 import com.google.android.gms.nearby.connection.DiscoveryOptions
 import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback
@@ -25,6 +31,8 @@ import com.google.android.gms.nearby.connection.PayloadCallback
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate
 import com.google.android.gms.nearby.connection.Strategy
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -91,6 +99,9 @@ class NearbyConnectionManager(
     private var onNeighborConnectedCallback: ((NodeId) -> Unit)? = null
     var fileTransferUpdateListener: ((transferId: UUID, update: PayloadTransferUpdate, payload: Payload?) -> Unit)? = null
 
+    private var bluetoothReceiver: BroadcastReceiver? = null
+    private var maintenanceJob: Job? = null
+
     fun setOnNeighborLostListener(listener: (NodeId) -> Unit) {
         onNeighborLostCallback = listener
     }
@@ -102,12 +113,22 @@ class NearbyConnectionManager(
     fun getDeviceName(nodeId: NodeId): String? = nodeIdToDeviceName[nodeId]
 
     fun start() {
+        registerBluetoothStateReceiver()
         startAdvertising()
         startDiscovery()
+        startPeriodicMaintenance()
     }
 
     fun stop() {
         _isScanning.value = false
+        maintenanceJob?.cancel()
+        maintenanceJob = null
+        if (bluetoothReceiver != null) {
+            try {
+                context.applicationContext.unregisterReceiver(bluetoothReceiver)
+            } catch (_: Exception) {}
+            bluetoothReceiver = null
+        }
         try {
             connectionsClient.stopDiscovery()
             connectionsClient.stopAdvertising()
@@ -126,12 +147,97 @@ class NearbyConnectionManager(
         logger.info("NEARBY", "Nearby Connections stopped")
     }
 
+    private fun registerBluetoothStateReceiver() {
+        if (bluetoothReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    when (state) {
+                        BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> {
+                            logger.warn("NEARBY", "Bluetooth disabled by user - clearing all active mesh neighbors")
+                            _isScanning.value = false
+                            val lostNodes = _neighbors.value.map { it.nodeId }
+                            _neighbors.value = emptyList()
+                            _pendingIncomingConnection.value = null
+                            endpointToNodeId.clear()
+                            nodeIdToEndpoint.clear()
+                            initiatedConnections.clear()
+                            _statusMessage.value = "Bluetooth disabled"
+                            lostNodes.forEach { onNeighborLostCallback?.invoke(it) }
+                        }
+                        BluetoothAdapter.STATE_ON -> {
+                            logger.info("NEARBY", "Bluetooth enabled by user - auto-restarting Nearby discovery & advertising")
+                            scope.launch {
+                                delay(600L)
+                                refreshDiscovery()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        try {
+            ContextCompat.registerReceiver(
+                context.applicationContext,
+                receiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            bluetoothReceiver = receiver
+            logger.info("NEARBY", "Registered Bluetooth state change receiver")
+        } catch (e: Exception) {
+            logger.warn("NEARBY", "Failed to register Bluetooth state receiver: ${e.message}")
+        }
+    }
+
+    private fun startPeriodicMaintenance() {
+        maintenanceJob?.cancel()
+        maintenanceJob = scope.launch {
+            while (true) {
+                delay(8_000L)
+                pruneStaleDiscoveredNeighbors()
+            }
+        }
+    }
+
+    private fun pruneStaleDiscoveredNeighbors() {
+        val now = System.currentTimeMillis()
+        val currentList = _neighbors.value
+        val stale = currentList.filter { !it.isConnected && it.status == NeighborStatus.DISCOVERED && it.isStale(now, 25_000L) }
+        if (stale.isNotEmpty()) {
+            val staleIds = stale.map { it.nodeId }.toSet()
+            logger.info("NEARBY", "Pruning ${stale.size} stale discovered neighbor(s): ${staleIds.joinToString { it.value }}")
+            staleIds.forEach { staleId ->
+                val ep = nodeIdToEndpoint.remove(staleId)
+                if (ep != null) {
+                    endpointToNodeId.remove(ep)
+                    initiatedConnections.remove(ep)
+                }
+            }
+            _neighbors.value = currentList.filter { !staleIds.contains(it.nodeId) }
+            staleIds.forEach { onNeighborLostCallback?.invoke(it) }
+        }
+    }
+
     fun refreshDiscovery() {
         logger.info("NEARBY", "Refreshing Nearby discovery and advertising")
+        // Preserve genuinely CONNECTED neighbors; remove stale unconnected ones so they can be freshly discovered with valid endpoints
+        val connectedNeighbors = _neighbors.value.filter { it.isConnected }
+        _neighbors.value = connectedNeighbors
+        val connectedNodeIds = connectedNeighbors.map { it.nodeId }.toSet()
+        nodeIdToEndpoint.keys.retainAll(connectedNodeIds)
+        val connectedEndpoints = nodeIdToEndpoint.values.toSet()
+        endpointToNodeId.keys.retainAll(connectedEndpoints)
+        initiatedConnections.clear()
+
         try {
             connectionsClient.stopDiscovery()
             connectionsClient.stopAdvertising()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            logger.debug("NEARBY", "Stop discovery/advertising warning: ${e.message}")
+        }
         startAdvertising()
         startDiscovery()
     }
@@ -183,21 +289,33 @@ class NearbyConnectionManager(
                 return
             }
             logger.info("NEARBY", "Discovered endpoint $endpointId: Node $peerNodeId ($devName)")
+
+            val oldEndpoint = nodeIdToEndpoint[peerNodeId]
+            if (oldEndpoint != null && oldEndpoint != endpointId) {
+                endpointToNodeId.remove(oldEndpoint)
+                initiatedConnections.remove(oldEndpoint)
+            }
+
             endpointToNodeId[endpointId] = peerNodeId
             nodeIdToEndpoint[peerNodeId] = endpointId
             nodeIdToDeviceName[peerNodeId] = devName
 
-            updateNeighbor(peerNodeId, endpointId, NeighborStatus.DISCOVERED, isConnected = false)
+            val current = _neighbors.value.firstOrNull { it.nodeId == peerNodeId }
+            if (current == null || !current.isConnected) {
+                updateNeighbor(peerNodeId, endpointId, NeighborStatus.DISCOVERED, isConnected = false)
+            }
         }
 
         override fun onEndpointLost(endpointId: String) {
-            val peerNodeId = endpointToNodeId[endpointId] ?: return
+            val peerNodeId = endpointToNodeId.remove(endpointId) ?: return
             logger.info("NEARBY", "Endpoint lost: $endpointId ($peerNodeId)")
-            val current = _neighbors.value.firstOrNull { it.nodeId == peerNodeId }
-            if (current?.status != NeighborStatus.CONNECTED) {
-                _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
-                endpointToNodeId.remove(endpointId)
+            if (nodeIdToEndpoint[peerNodeId] == endpointId) {
                 nodeIdToEndpoint.remove(peerNodeId)
+                val current = _neighbors.value.firstOrNull { it.nodeId == peerNodeId }
+                if (current?.status != NeighborStatus.CONNECTED) {
+                    _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
+                    onNeighborLostCallback?.invoke(peerNodeId)
+                }
             }
         }
     }
@@ -220,6 +338,12 @@ class NearbyConnectionManager(
                 connectionsClient.acceptConnection(endpointId, payloadCallback)
                     .addOnFailureListener { e ->
                         logger.error("NEARBY", "Failed to accept initiated connection to $endpointId: ${e.message}")
+                        initiatedConnections.remove(endpointId)
+                        endpointToNodeId.remove(endpointId)
+                        if (nodeIdToEndpoint[peerNodeId] == endpointId) {
+                            nodeIdToEndpoint.remove(peerNodeId)
+                        }
+                        _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
                     }
             } else {
                 // Incoming connection requested by peer: prompt the user with popup
@@ -236,7 +360,7 @@ class NearbyConnectionManager(
         override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
             initiatedConnections.remove(endpointId)
             val peerNodeId = endpointToNodeId[endpointId]
-            if (resolution.status.isSuccess) {
+            if (resolution.status.isSuccess || resolution.status.statusCode == ConnectionsStatusCodes.STATUS_ALREADY_CONNECTED_TO_ENDPOINT) {
                 logger.info("NEARBY", "Connection successfully established with node ${peerNodeId?.value} (endpoint $endpointId)")
                 if (peerNodeId != null) {
                     updateNeighbor(peerNodeId, endpointId, NeighborStatus.CONNECTED, isConnected = true)
@@ -245,7 +369,13 @@ class NearbyConnectionManager(
             } else {
                 logger.warn("NEARBY", "Connection to endpoint $endpointId (${peerNodeId?.value}) resolved with status: ${resolution.status.statusCode}")
                 if (peerNodeId != null) {
-                    updateNeighbor(peerNodeId, endpointId, NeighborStatus.DISCONNECTED, isConnected = false)
+                    if (nodeIdToEndpoint[peerNodeId] == endpointId) {
+                        nodeIdToEndpoint.remove(peerNodeId)
+                    }
+                    endpointToNodeId.remove(endpointId)
+                    _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
+                    onNeighborLostCallback?.invoke(peerNodeId)
+                    refreshDiscovery()
                 }
             }
             if (_pendingIncomingConnection.value?.endpointId == endpointId) {
@@ -254,15 +384,21 @@ class NearbyConnectionManager(
         }
 
         override fun onDisconnected(endpointId: String) {
-            val peerNodeId = endpointToNodeId[endpointId]
+            val peerNodeId = endpointToNodeId.remove(endpointId)
             logger.info("NEARBY", "Disconnected from endpoint $endpointId (${peerNodeId?.value})")
             if (peerNodeId != null) {
-                updateNeighbor(peerNodeId, endpointId, NeighborStatus.DISCONNECTED, isConnected = false)
+                if (nodeIdToEndpoint[peerNodeId] == endpointId) {
+                    nodeIdToEndpoint.remove(peerNodeId)
+                }
+                // DYNAMIC CLEANUP: Remove the disconnected device completely from nearby devices list
+                _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
                 onNeighborLostCallback?.invoke(peerNodeId)
             }
             if (_pendingIncomingConnection.value?.endpointId == endpointId) {
                 _pendingIncomingConnection.value = null
             }
+            // Automatically refresh discovery so active devices can be immediately rediscovered
+            refreshDiscovery()
         }
     }
 
@@ -276,9 +412,13 @@ class NearbyConnectionManager(
             }
             .addOnFailureListener { e ->
                 logger.error("NEARBY", "Failed to accept incoming connection from $endpointId: ${e.message}")
-                val peerNodeId = endpointToNodeId[endpointId]
+                val peerNodeId = endpointToNodeId.remove(endpointId)
                 if (peerNodeId != null) {
-                    updateNeighbor(peerNodeId, endpointId, NeighborStatus.DISCONNECTED, isConnected = false)
+                    if (nodeIdToEndpoint[peerNodeId] == endpointId) {
+                        nodeIdToEndpoint.remove(peerNodeId)
+                    }
+                    _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
+                    onNeighborLostCallback?.invoke(peerNodeId)
                 }
             }
     }
@@ -294,15 +434,20 @@ class NearbyConnectionManager(
             .addOnFailureListener { e ->
                 logger.error("NEARBY", "Failed to reject incoming connection from $endpointId: ${e.message}")
             }
-        val peerNodeId = endpointToNodeId[endpointId]
+        val peerNodeId = endpointToNodeId.remove(endpointId)
         if (peerNodeId != null) {
-            updateNeighbor(peerNodeId, endpointId, NeighborStatus.DISCONNECTED, isConnected = false)
+            if (nodeIdToEndpoint[peerNodeId] == endpointId) {
+                nodeIdToEndpoint.remove(peerNodeId)
+            }
+            _neighbors.value = _neighbors.value.filter { it.nodeId != peerNodeId }
+            onNeighborLostCallback?.invoke(peerNodeId)
         }
     }
 
     fun connectToNeighbor(nodeId: NodeId): Boolean {
         val endpointId = nodeIdToEndpoint[nodeId] ?: run {
             logger.warn("NEARBY", "Cannot connect to $nodeId: endpoint not found in discovery map")
+            refreshDiscovery()
             return false
         }
         updateNeighbor(nodeId, endpointId, NeighborStatus.CONNECTING, isConnected = false)
@@ -314,9 +459,30 @@ class NearbyConnectionManager(
         ).addOnSuccessListener {
             logger.info("NEARBY", "Connection requested to node $nodeId (endpoint $endpointId)")
         }.addOnFailureListener { e ->
-            logger.error("NEARBY", "Failed to request connection to node $nodeId: ${e.message}")
+            logger.error("NEARBY", "Failed to request connection to node $nodeId ($endpointId): ${e.message}")
             initiatedConnections.remove(endpointId)
-            updateNeighbor(nodeId, endpointId, NeighborStatus.DISCONNECTED, isConnected = false)
+            if (nodeIdToEndpoint[nodeId] == endpointId) {
+                nodeIdToEndpoint.remove(nodeId)
+            }
+            endpointToNodeId.remove(endpointId)
+            _neighbors.value = _neighbors.value.filter { it.nodeId != nodeId }
+            refreshDiscovery()
+        }
+
+        // Safety timeout: if after 25s the connection is still in CONNECTING state, abort and refresh
+        scope.launch {
+            delay(25_000L)
+            val current = _neighbors.value.firstOrNull { it.nodeId == nodeId }
+            if (current?.status == NeighborStatus.CONNECTING) {
+                logger.warn("NEARBY", "Connection attempt to $nodeId ($endpointId) timed out after 25s")
+                initiatedConnections.remove(endpointId)
+                if (nodeIdToEndpoint[nodeId] == endpointId) {
+                    nodeIdToEndpoint.remove(nodeId)
+                }
+                endpointToNodeId.remove(endpointId)
+                _neighbors.value = _neighbors.value.filter { it.nodeId != nodeId }
+                refreshDiscovery()
+            }
         }
         return true
     }
@@ -328,8 +494,11 @@ class NearbyConnectionManager(
         } catch (e: Exception) {
             logger.warn("NEARBY", "Error disconnecting from endpoint $endpointId: ${e.message}")
         }
-        updateNeighbor(nodeId, endpointId, NeighborStatus.DISCONNECTED, isConnected = false)
+        endpointToNodeId.remove(endpointId)
+        nodeIdToEndpoint.remove(nodeId)
+        _neighbors.value = _neighbors.value.filter { it.nodeId != nodeId }
         onNeighborLostCallback?.invoke(nodeId)
+        refreshDiscovery()
         return true
     }
 

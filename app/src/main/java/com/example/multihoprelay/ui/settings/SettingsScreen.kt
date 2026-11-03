@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.Screen
 import com.example.multihoprelay.ui.AppViewModel
@@ -38,16 +39,23 @@ fun SettingsScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit) {
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Settings", style = MaterialTheme.typography.titleLarge)
+        Text("Settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
 
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("Node ID", style = MaterialTheme.typography.labelSmall)
-                Text(viewModel.nodeId.value, fontWeight = FontWeight.Bold)
+                Text(
+                    viewModel.nodeId.value,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Text(
                     "Public Key (Base64, truncated): ${viewModel.publicKeyBase64.take(48)}...",
                     style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier.padding(top = 4.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -97,11 +105,11 @@ fun SettingsScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit) {
         }
 
         OutlinedButton(onClick = { viewModel.clearRelayCache() }, modifier = Modifier.fillMaxWidth()) {
-            Text("Clear Relay Cache")
+            Text("Clear Relay Cache", maxLines = 1, softWrap = false)
         }
 
         OutlinedButton(onClick = { onNavigate(Screen.Logs.route) }, modifier = Modifier.fillMaxWidth()) {
-            Text("View Debug Logs")
+            Text("View Debug Logs", maxLines = 1, softWrap = false)
         }
 
         OutlinedButton(
@@ -109,7 +117,7 @@ fun SettingsScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
         ) {
-            Text("Reset Identity")
+            Text("Reset Identity", maxLines = 1, softWrap = false)
         }
     }
 
@@ -118,21 +126,23 @@ fun SettingsScreen(viewModel: AppViewModel, onNavigate: (String) -> Unit) {
             onDismissRequest = { showResetDialog = false },
             title = { Text("Reset Identity?") },
             text = {
-                Text(
-                    "This generates a brand-new key pair and Node ID for this device. " +
-                        "Peers will see you as a completely different, unrelated node afterwards. " +
-                        "Any transfer currently addressed to your old identity can no longer be " +
-                        "decrypted by this device. This cannot be undone."
-                )
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "This generates a brand-new key pair and Node ID for this device. " +
+                            "Peers will see you as a completely different, unrelated node afterwards. " +
+                            "Any transfer currently addressed to your old identity can no longer be " +
+                            "decrypted by this device. This cannot be undone."
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.resetIdentity()
                     showResetDialog = false
-                }) { Text("Reset", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Reset", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false) }
             },
             dismissButton = {
-                TextButton(onClick = { showResetDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showResetDialog = false }) { Text("Cancel", maxLines = 1, softWrap = false) }
             }
         )
     }

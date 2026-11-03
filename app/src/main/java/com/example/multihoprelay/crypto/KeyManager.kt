@@ -98,7 +98,8 @@ class KeyManager(private val context: Context) {
                 KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
         )
             .setKeySize(2048)
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512, KeyProperties.DIGEST_SHA1)
+            .setBlockModes(KeyProperties.BLOCK_MODE_ECB)
             .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PSS)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
             .setUserAuthenticationRequired(false)

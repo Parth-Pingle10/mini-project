@@ -11,9 +11,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Home
@@ -36,10 +39,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -181,7 +188,16 @@ fun MultiHopRelayApp(viewModel: AppViewModel, onRequestPermissions: () -> Unit) 
                             }
                         },
                         icon = { Icon(screenIcon(screen), contentDescription = screen.label) },
-                        label = { Text(screen.label) }
+                        label = {
+                            Text(
+                                text = screen.label,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp, letterSpacing = (-0.2).sp)
+                            )
+                        },
+                        alwaysShowLabel = true
                     )
                 }
             }
@@ -248,7 +264,10 @@ fun IncomingTransferDialog(
             Text("Incoming File Transfer", fontWeight = FontWeight.Bold)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
                     "Device ${transfer.peerNodeId.value} wants to send you a file over MultiHopRelay mesh.",
                     style = MaterialTheme.typography.bodyMedium
@@ -256,24 +275,48 @@ fun IncomingTransferDialog(
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("File Name:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
-                    Text(transfer.fileName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                    Text("File Name:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+                    Text(
+                        transfer.fileName,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("File Size:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
-                    Text(FormatUtils.formatFileSize(transfer.fileSizeBytes), style = MaterialTheme.typography.bodySmall)
+                    Text("File Size:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+                    Text(
+                        FormatUtils.formatFileSize(transfer.fileSizeBytes),
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.End,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Sender Node:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
-                    Text(transfer.peerNodeId.value, style = MaterialTheme.typography.bodySmall)
+                    Text("Sender Node:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+                    Text(
+                        transfer.peerNodeId.value,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                 Row(
@@ -305,14 +348,18 @@ fun IncomingTransferDialog(
                 onClick = onAllow,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF2E7D32)
-                )
+                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
             ) {
-                Text("Allow")
+                Text("Allow", maxLines = 1, softWrap = false)
             }
         },
         dismissButton = {
-            OutlinedButton(onClick = onReject) {
-                Text("Reject")
+            OutlinedButton(
+                onClick = onReject,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                Text("Reject", maxLines = 1, softWrap = false)
             }
         }
     )
@@ -337,7 +384,10 @@ fun IncomingConnectionDialog(
             Text("Incoming Connection Request", fontWeight = FontWeight.Bold)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
                     "A nearby device wants to connect with your node over Google Nearby Connections.",
                     style = MaterialTheme.typography.bodyMedium
@@ -345,29 +395,50 @@ fun IncomingConnectionDialog(
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Peer Node ID:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
-                    Text(connection.peerNodeId.value, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                    Text("Peer Node ID:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+                    Text(
+                        connection.peerNodeId.value,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Device Name:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
-                    Text(connection.endpointName, style = MaterialTheme.typography.bodySmall)
+                    Text("Device Name:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+                    Text(
+                        connection.endpointName,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 if (connection.authenticationDigits.isNotBlank()) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Auth Code:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                        Text("Auth Code:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
                         Text(
                             connection.authenticationDigits,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.bodySmall
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.End,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f)
                         )
                     }
                 }
@@ -384,16 +455,21 @@ fun IncomingConnectionDialog(
                 onClick = onAccept,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF2E7D32)
-                )
+                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
             ) {
-                Text("Accept")
+                Text("Accept", maxLines = 1, softWrap = false)
             }
         },
         dismissButton = {
-            OutlinedButton(onClick = onReject) {
-                Text("Reject")
+            OutlinedButton(
+                onClick = onReject,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                Text("Reject", maxLines = 1, softWrap = false)
             }
         }
     )
 }
+
 

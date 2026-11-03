@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
@@ -39,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.multihoprelay.model.NodeId
 import com.example.multihoprelay.model.TransferState
@@ -92,6 +95,7 @@ fun SendScreen(viewModel: AppViewModel) {
     Column(
         Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -103,12 +107,26 @@ fun SendScreen(viewModel: AppViewModel) {
                 Text("Select File to Transfer", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 if (selectedFile != null) {
                     val file = selectedFile!!
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(file.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
-                            Text("Size: ${formatFileSize(file.sizeBytes)} • Type: ${file.mimeType}", style = MaterialTheme.typography.bodySmall)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                file.name,
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "Size: ${formatFileSize(file.sizeBytes)} • Type: ${file.mimeType}",
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 } else {
@@ -121,9 +139,14 @@ fun SendScreen(viewModel: AppViewModel) {
 
                 OutlinedButton(
                     onClick = { filePicker.launch(arrayOf("*/*")) },
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier.padding(top = 4.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                 ) {
-                    Text(if (selectedFile == null) "Choose File" else "Change File")
+                    Text(
+                        if (selectedFile == null) "Choose File" else "Change File",
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
@@ -156,14 +179,22 @@ fun SendScreen(viewModel: AppViewModel) {
                                 onClick = { selectedDestination = node.nodeId }
                             )
                             Spacer(Modifier.width(4.dp))
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     node.displayName,
                                     fontWeight = FontWeight.SemiBold,
-                                    style = MaterialTheme.typography.bodyMedium
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 val statusColor = if (isReachable) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
-                                Text(node.statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                                Text(
+                                    node.statusText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = statusColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -196,7 +227,7 @@ fun SendScreen(viewModel: AppViewModel) {
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Send File")
+            Text("Send File", maxLines = 1, softWrap = false)
         }
 
         if (selectedDestination != null && !isDestConnected) {
@@ -219,7 +250,13 @@ fun SendScreen(viewModel: AppViewModel) {
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Sending: ${info.fileName}", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Sending: ${info.fileName}",
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         if (info.state == TransferState.COMPLETED) {
                             Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = Color(0xFF2E7D32))
                         } else if (info.state.isFailure) {
@@ -231,9 +268,25 @@ fun SendScreen(viewModel: AppViewModel) {
 
                     LinearProgressIndicator(progress = { info.progressFraction }, modifier = Modifier.fillMaxWidth())
 
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("${(info.progressFraction * 100).toInt()}% (${info.chunksDone} / ${info.totalChunks} chunks)", style = MaterialTheme.typography.bodySmall)
-                        Text(formatState(info.state), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "${(info.progressFraction * 100).toInt()}% (${info.chunksDone} / ${info.totalChunks} chunks)",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            formatState(info.state),
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
 
                     info.errorMessage?.let {
@@ -243,9 +296,10 @@ fun SendScreen(viewModel: AppViewModel) {
                     if (!info.state.isTerminal) {
                         OutlinedButton(
                             onClick = { viewModel.cancelTransfer(info.transferId) },
-                            modifier = Modifier.align(Alignment.End)
+                            modifier = Modifier.align(Alignment.End),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                         ) {
-                            Text("Cancel")
+                            Text("Cancel", maxLines = 1, softWrap = false)
                         }
                     }
                 }

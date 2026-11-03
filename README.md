@@ -259,3 +259,28 @@ stubs) as the authoritative build check, and report any issues found.
 - Does not install anything on, or otherwise use, a device without its owner's knowledge and
   explicit action (installing/running the app, granting permissions, and opting into Relay
   Mode are all separate, explicit user actions).
+
+
+
+## 📱 Download MultiHopRelay
+
+Download and install the latest version of MultiHopRelay for Android.
+
+[⬇️ Download MultiHopRelay APK](https://github.com/Parth-Pingle10/mini-project/releases/latest/download/app-debug.apk)
+
+### 🚀 Installation Instructions
+
+1. Click the download button above.
+2. Download the APK file.
+3. Open the downloaded APK on your Android device.
+4. Allow installation from unknown sources if prompted.
+5. Install and launch MultiHopRelay.
+
+### ✨ Features
+
+- Nearby Android device discovery.
+- Peer-to-peer file sharing.
+- Bluetooth and Nearby Connections support.
+- Connection and file transfer approval.
+- Transfer progress tracking.
+- Multihop relay-based file sharing.
